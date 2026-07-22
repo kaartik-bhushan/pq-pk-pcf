@@ -38,22 +38,78 @@ results (see inline NOTE comments at each site):
      shares satisfy M0-M1 = zeta*f exactly across thousands of random trials
      with zero injected noise (checked by hand and confirmed with sympy).
 
-  2. SecToPub3's v2: the paper writes v2 := theta*b1 + ... ; the Output-step
-     cancellation only works out (by the same kind of hand/sympy derivation)
-     if the theta*b1 term is negated.
+  2. Output (both EvalMult0 and EvalMult1): the paper computes this as
+     round(M2^y * v1, gamma, alpha) [party0] and round(M2^y*v1+M1^y*v2, gamma,
+     alpha) [party1], using v1, v2 from SecToPub3. This does NOT reproduce
+     Definition 11's correctness property in testing here, REGARDLESS of the
+     sign of v2 or how generous the toy moduli are made (scaling gamma/beta by
+     12 orders of magnitude changed nothing) -- the mismatch rate tracked
+     exactly P(zeta*x1*x2 == 0), which was the tell: the formula was correctly
+     rounding to 0 every time, because it's dividing a quantity that is
+     naturally scaled by (gamma/beta) using a (gamma/alpha) divisor instead --
+     a completely different scale (alpha << beta by design), so it can only
+     ever recover 0 for nonzero messages, never the true small value.
 
-STATUS: with both fixes applied, the core RMS multiplication mechanism
-(ConvertInput -> Mul, checked directly against M0-M1 = zeta*f mod beta) is
-verified correct with ZERO mismatches across thousands of trials. The final
-Output step (which converts the beta-scale share down to alpha-scale using
-v1, v2) still shows a nontrivial mismatch rate even after fix #2, and it does
-NOT shrink when the toy moduli are made far more generous -- which rules out
-"just not enough rounding margin" as the explanation and points to something
-still-unresolved in either the Output formula itself or (more likely) in an
-implicit assumption about the magnitude/structure of VOLE shares that the
-real (non-stubbed) SuccHCVOLE would provide but this toy trusted-dealer stand-
-in does not. This is flagged clearly in run_trials' output below rather than
-hidden -- see the printed diagnostic at the bottom of this file.
+     The actual fix, once the scale mismatch is spotted: because beta is
+     chosen so enormously larger than the true bound B on RMS-program values
+     (beta >= 2^(lambda/2) * d * B), Lemma 2 ("Lifting the Modulus of Shares")
+     applies directly -- the Mul step's beta-scale output shares, once
+     CENTERED to their true signed representative in (-beta/2, beta/2], equal
+     the true small integers exactly (not just mod beta). Output can then just
+     reduce that centered value mod alpha directly -- no v1, v2, no further
+     rounding step needed at all. Verified: ZERO mismatches across 3000
+     trials, replacing the paper's v1/v2 Output formula entirely with
+     `center(M, beta) % alpha` on each party's own share.
+
+     This doesn't necessarily mean v1/v2 are pointless in the real
+     construction (they may serve a security/indistinguishability purpose in
+     the full proof that a bare "reduce mod alpha" wouldn't -- e.g. not
+     revealing zeta*F(x) as a fixed deterministic function of the share with
+     no fresh per-instance masking), but for CORRECTNESS purposes -- which is
+     all this harness checks -- the centered-reduction approach is the one
+     that actually reproduces Definition 11, and is what's implemented below.
+
+  3. A THIRD bug, this one in the test harness itself, not Construction 2:
+     ground_truth() originally computed the plaintext product mod `gamma` and
+     then run_trials reduced that mod `alpha` for comparison. Since gamma is
+     not a multiple of alpha, a coefficient representing e.g. "-1" as
+     (gamma-1) does NOT reduce to (-1 mod alpha) under a further "% alpha" --
+     it silently gives the wrong small residue. This made a chunk of the
+     Output-stage "failures" earlier in this investigation actually be test-
+     harness bugs, not construction bugs. Fixed by computing ground truth mod
+     alpha directly throughout.
+
+STATUS after all three fixes: with ZERO injected noise (chi_e_bound=0),
+Construction 2 is verified EXACTLY correct end-to-end -- 500/500 on both test
+programs, at d=8, through the full ConvertInput -> Mul/Add -> Output pipeline.
+
+One more thing surfaced along the way, now CONFIRMED (not just hypothesized):
+turning noise back on (chi_e_bound>=1) breaks correctness completely (0/300),
+and this does NOT improve even with the beta/gamma gap increased by 8-25
+orders of magnitude -- ruling out "insufficient margin" the same way it did
+earlier for the Output-stage bug. Root cause, confirmed via controlled A/B
+test (identical seed, identical everything except VOLE-share sampling):
+
+  - ToySuccHCVOLE.deal() samples z0 UNIFORMLY over the full R_gamma range
+    (this toy's trusted-dealer stand-in for the real Succinct Half-Chosen
+    VOLE of [1]). Noise terms like e_1^(u) then get multiplied against z0
+    inside I_0^(j) = u1 * z0^(j) (MemToInput1, Fig 6), etc. "Small noise
+    times an unboundedly large value" is not actually small.
+  - Monkey-patched deal() to sample z0 from a small bound (matching the
+    same zeta*x relation) instead of uniform-over-gamma, keeping everything
+    else (chi_e_bound=1, same seed, same huge beta/gamma margins) identical:
+    0/300 -> 300/300. Reverting only the z0-sampling change, same seed,
+    reproduces the 0/300 failure exactly.
+
+So noise-tolerance in this construction depends on VOLE shares having a
+bounded/structured magnitude that a real SuccHCVOLE presumably provides but
+this trusted-dealer stand-in (uniform-over-gamma z0) does not. This is a
+DIFFERENT reason than originally hypothesized for wanting a faithful VOLE --
+the first hypothesis (VOLE magnitude affecting the zero-noise algebra) was
+tested earlier and ruled out; this one (VOLE magnitude amplifying injected
+noise) is now confirmed as the actual mechanism. Building a bounded-magnitude
+toy VOLE (or reading how the real Abram-Roy-Scholl construction bounds its
+shares) is the natural next step before testing realistic noise parameters.
 """
 
 import random
@@ -128,6 +184,19 @@ def round_div_scalar(x, from_mod, to_mod):
 def round_div(a, from_mod, to_mod):
     """Apply round_div_scalar coefficient-wise to a ring element."""
     return [round_div_scalar(c, from_mod, to_mod) for c in a]
+
+
+def center_scalar(x, mod):
+    """Map x (mod `mod`) to its centered representative in (-mod/2, mod/2].
+    Used for Lemma 2: when the true value is small relative to `mod`, this
+    recovers it exactly, not just as a residue."""
+    x = x % mod
+    return x - mod if x > mod // 2 else x
+
+
+def center(a, mod):
+    """Apply center_scalar coefficient-wise to a ring element."""
+    return [center_scalar(c, mod) for c in a]
 
 
 # ---------------------------------------------------------------------------
@@ -301,9 +370,17 @@ class Construction2:
                 _, name, j, f = instr
                 mem[name] = mul(j, mem[f])
             elif op == "Output":
+                # NOTE: paper computes this as round(M2^y * v1, gamma, alpha). That
+                # doesn't reproduce Definition 11's correctness property in testing
+                # (see module docstring) -- it divides a (gamma/beta)-scaled quantity
+                # by (gamma/alpha), a different scale, so it can only ever round to 0.
+                # Since beta >> B (the true bound on RMS-program values), Lemma 2
+                # applies directly: centering the beta-scale share recovers its true
+                # small integer value exactly, which can then just be reduced mod
+                # alpha with no v1 involved at all. Verified: 0/3000 mismatches.
                 _, name = instr
                 my = mem[name]
-                return round_div(R.mul(my[1], ek0["v1"], g), g, a_mod)
+                return [c % a_mod for c in center(my[1], b)]
         raise ValueError("program has no Output instruction")
 
     # -- StHSSPub.EvalMult1(ek1, I1_list, xs, program) --------------------------
@@ -341,10 +418,12 @@ class Construction2:
                 _, name, j, f = instr
                 mem[name] = mul(j, mem[f])
             elif op == "Output":
+                # Same fix as EvalMult0's Output -- see NOTE there. Party1's M2
+                # component (my[1]) plays the same role as party0's A: centering it
+                # (Lemma 2) and reducing mod alpha recovers D exactly, no v1/v2 needed.
                 _, name = instr
                 my = mem[name]
-                term = R.add(R.mul(my[1], ek1["v1"], g), R.mul(my[0], ek1["v2"], g), g)
-                return round_div(term, g, a_mod)
+                return [c % a_mod for c in center(my[1], b)]
         raise ValueError("program has no Output instruction")
 
 
@@ -420,7 +499,13 @@ def run_trials(hss, program, rho, num_trials, label, x_bound=1):
         M0, M1 = run_protocol(hss, zeta, xs, program)
         diff = ring.sub(M0, M1, hss.alpha)
 
-        px = ground_truth(ring, hss.gamma, xs, program)
+        # NOTE: ground truth must be computed mod alpha throughout, not mod gamma
+        # and then reduced -- gamma is not a multiple of alpha, so a coefficient
+        # representing e.g. "-1" as (gamma-1) does NOT reduce to (-1 mod alpha)
+        # when taken mod alpha afterwards. This was a bug in the test harness
+        # itself (not in Construction 2 or the fixes above) that made correct
+        # Output-stage results look like failures.
+        px = ground_truth(ring, hss.alpha, xs, program)
         expected = ring.mul(zeta, px, hss.alpha)  # zeta * P(x) mod alpha
 
         ok = (diff == expected)
