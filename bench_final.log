@@ -1,0 +1,108 @@
+=== flags: 
+Params: N=32768 n=1024 alpha=65537  log2(beta)=290 log2(gamma)=754 log2(beta')=116 log2(p)=290 log2(gamma')=365  (limbs beta/gamma/beta'/p/gamma' = 5/13/2/5/7)
+KeyGen0: 343.3 ms  (pk0: 65 A_j + 3 u + 14 v ring elements)
+KeyGen1: 1608.8 ms  (pk1: 32 ring elements)
+KeyDer0: 3169.0 ms
+KeyDer1: 18224.7 ms
+  [party 0] per-eval breakdown (ms):
+    hash                         4.77
+    inputshares                  9.98
+    lift                        12.77
+    lincomb                      3.89
+    memshares                    3.37
+    ntt                         41.71
+    output-lift                  3.51
+    output-theta                43.06
+    pointwise                    5.75
+    prf                          1.07
+    rescale                     17.31
+    TOTAL                      147.18
+  [party 1] per-eval breakdown (ms):
+    hash                         4.44
+    inputshares                 27.16
+    lift                        13.10
+    lincomb                     11.29
+    memshares                    3.58
+    ntt                         42.43
+    output-lift                  3.60
+    output-theta                52.26
+    pointwise                   25.98
+    prf                          1.15
+    rescale                     17.54
+    TOTAL                      202.52
+
+RESULT: N=32768 slots/eval, party0 148.8 ms/eval, party1 204.1 ms/eval
+        OTs/s (1 thread per party, bounded by the slower party): 160513   [party0 alone: 220256, party1 alone: 160513]
+        correctness: 163840/163840 OTs consistent
+=== flags: --ifma
+Params: N=32768 n=1024 alpha=65537  log2(beta)=300 log2(gamma)=750 log2(beta')=150 log2(p)=300 log2(gamma')=367  (limbs beta/gamma/beta'/p/gamma' = 6/15/3/6/8)
+KeyGen0: 346.7 ms  (pk0: 65 A_j + 3 u + 14 v ring elements)
+KeyGen1: 1557.9 ms  (pk1: 32 ring elements)
+KeyDer0: 3282.6 ms
+KeyDer1: 18690.3 ms
+  [party 0] per-eval breakdown (ms):
+    hash                         5.63
+    inputshares                  9.31
+    lift                        11.80
+    lincomb                      3.69
+    memshares                    6.36
+    ntt                         29.33
+    output-lift                  3.71
+    output-theta                35.10
+    pointwise                    4.38
+    prf                          1.11
+    rescale                     14.55
+    TOTAL                      124.97
+  [party 1] per-eval breakdown (ms):
+    hash                         4.89
+    inputshares                 24.59
+    lift                        12.16
+    lincomb                     10.96
+    memshares                    5.01
+    ntt                         29.40
+    output-lift                  3.57
+    output-theta                43.33
+    pointwise                   21.59
+    prf                          1.15
+    rescale                     15.17
+    TOTAL                      171.83
+
+RESULT: N=32768 slots/eval, party0 126.9 ms/eval, party1 173.8 ms/eval
+        OTs/s (1 thread per party, bounded by the slower party): 188534   [party0 alone: 258120, party1 alone: 188534]
+        correctness: 163840/163840 OTs consistent
+=== flags: --ifma --threads 2
+Params: N=32768 n=1024 alpha=65537  log2(beta)=300 log2(gamma)=750 log2(beta')=150 log2(p)=300 log2(gamma')=367  (limbs beta/gamma/beta'/p/gamma' = 6/15/3/6/8)
+KeyGen0: 263.5 ms  (pk0: 65 A_j + 3 u + 14 v ring elements)
+KeyGen1: 1039.4 ms  (pk1: 32 ring elements)
+KeyDer0: 2189.1 ms
+KeyDer1: 11905.6 ms
+  [party 0] per-eval breakdown (ms):
+    hash                         4.12
+    inputshares                  7.30
+    lift                         9.53
+    lincomb                      3.41
+    memshares                    6.25
+    ntt                         14.71
+    output-lift                  2.89
+    output-theta                27.10
+    pointwise                    2.31
+    prf                          0.92
+    rescale                     11.22
+    TOTAL                       89.75
+  [party 1] per-eval breakdown (ms):
+    hash                         4.43
+    inputshares                 15.00
+    lift                         9.51
+    lincomb                     10.13
+    memshares                    5.22
+    ntt                         13.94
+    output-lift                  3.05
+    output-theta                31.88
+    pointwise                   11.38
+    prf                          0.93
+    rescale                     11.15
+    TOTAL                      116.62
+
+RESULT: N=32768 slots/eval, party0 91.6 ms/eval, party1 118.5 ms/eval
+        OTs/s (2 threads per party, bounded by the slower party): 276522   [party0 alone: 357627, party1 alone: 276522]
+        correctness: 163840/163840 OTs consistent

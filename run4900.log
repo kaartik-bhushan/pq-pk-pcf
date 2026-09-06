@@ -1,0 +1,40 @@
+Params: N=32768 n=4900 alpha=65537  log2(beta)=290 log2(gamma)=754 log2(beta')=116 log2(p)=290 log2(gamma')=365  (limbs beta/gamma/beta'/p/gamma' = 5/13/2/5/7)
+KeyGen0: 603.0 ms  (pk0: 141 A_j + 3 u + 14 v ring elements)
+KeyGen1: 8270.9 ms  (pk1: 70 ring elements)
+KeyDer0: 378.6 ms
+KeyDer1: 182977.1 ms
+eval 0: party0 193.8 ms, party1 215.9 ms | OTs correct 32768/32768, other-string collisions 0, b=1 fraction 0.499
+  memory-share invariants: OK, RMS values: OK, output shares: OK
+eval 1: party0 169.1 ms, party1 188.8 ms | OTs correct 32768/32768, other-string collisions 0, b=1 fraction 0.498
+eval 2: party0 157.1 ms, party1 187.4 ms | OTs correct 32768/32768, other-string collisions 0, b=1 fraction 0.500
+  [party 0] per-eval breakdown (ms):
+    hash                         7.12
+    inputshares                 10.89
+    lift                        12.43
+    lincomb                      3.87
+    memshares                   26.59
+    ntt                         41.02
+    output-lift                  3.55
+    output-theta                42.40
+    pointwise                    5.95
+    prf                          1.18
+    rescale                     16.74
+    TOTAL                      171.73
+  [party 1] per-eval breakdown (ms):
+    hash                         6.41
+    inputshares                 26.23
+    lift                        12.29
+    lincomb                     10.93
+    memshares                    3.87
+    ntt                         39.90
+    output-lift                  3.39
+    output-theta                50.80
+    pointwise                   24.67
+    prf                          1.05
+    rescale                     16.28
+    TOTAL                      195.81
+
+RESULT: N=32768 slots/eval, party0 173.3 ms/eval, party1 197.4 ms/eval
+        OTs/s (1 thread per party, bounded by the slower party): 166022   [party0 alone: 189051, party1 alone: 166022]
+        correctness: 98304/98304 OTs consistent
+exit=0
