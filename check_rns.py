@@ -9,30 +9,29 @@ def crt(res, mods):
     for r, m in zip(res, mods):
         Mi = M // m
         x += r * Mi * pow(Mi, -1, m)
-    return x % M, M
+    return x % M
 
 lines = open(sys.argv[1] if len(sys.argv) > 1 else "rns_dump.txt").read().split("\n")
 primes = list(map(int, lines[0].split()[1:]))
-_, kb, _, kg, _, alpha = lines[1].split()
-kb, kg, alpha = int(kb), int(kg), int(alpha)
-beta_p, Q_p = primes[:kb], primes[kb:kg]
-beta = reduce(lambda a, b: a * b, beta_p)
-Q = reduce(lambda a, b: a * b, Q_p)
+t = lines[1].split(); kb, ka, kg, kQs = int(t[1]), int(t[3]), int(t[5]), int(t[7])
+beta_p = primes[:kb]; alpha = primes[ka]; Q_p = primes[ka + 1:kg]
+prod = lambda l: reduce(lambda a, b: a * b, l, 1)
+beta, Q = prod(beta_p), prod(Q_p)
 n_ok = n_bad = 0
 for ln in lines[2:]:
     if not ln.strip():
         continue
     t = ln.split()
     v = list(map(int, t[1:]))
-    if t[0] == "rescale":
-        x, _ = crt(v[:kg], primes[:kg])
-        expect = ((x + Q // 2) // Q) % beta
-        got, _ = crt(v[kg:kg + kb], beta_p)
-        ok = expect == got
+    if t[0] == "rescale_g":                       # round(x / (alpha Q~)) mod beta
+        x = crt(v[:kg], primes); D = alpha * Q
+        ok = ((x + D // 2) // D) % beta == crt(v[kg:kg + kb], beta_p)
+    elif t[0] == "rescale_o":                     # round(x / (beta Q_s)) mod alpha
+        x = crt(v[:kg], primes); D = beta * prod(Q_p[:kQs])
+        ok = ((x + D // 2) // D) % alpha == v[kg]
     elif t[0] == "lift":
-        h, _ = crt(v[:kb], beta_p)
-        got, _ = crt(v[kb:kb + kg], primes[:kg])
-        ok = (h == got) and (v[kb + kg] == h % alpha)
+        h = crt(v[:kb], beta_p)
+        ok = h == crt(v[kb:kb + kg], primes)
     else:
         continue
     n_ok += ok; n_bad += (not ok)

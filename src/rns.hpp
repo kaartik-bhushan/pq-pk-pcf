@@ -227,6 +227,21 @@ inline void poly_mul_acc(RNSPoly& r, const RNSPoly& a, const RNSPoly& b, RNSPoly
     hx::EltwiseAddMod(r.limb(i), r.limb(i), tmp.limb(i), a.N, B.q[i]);
   });
 }
+// the same, restricted to a set of limb indices
+inline void poly_ntt_idx(RNSPoly& a, const Base& B, const std::vector<size_t>& idx) {
+  par_for(idx.size(), [&](size_t j) { size_t i = idx[j]; B.ntt[i]->ComputeForward(a.limb(i), a.limb(i), 2, 1); });
+}
+inline void poly_intt_idx(RNSPoly& a, const Base& B, const std::vector<size_t>& idx) {
+  par_for(idx.size(), [&](size_t j) { size_t i = idx[j]; B.ntt[i]->ComputeInverse(a.limb(i), a.limb(i), 2, 1); });
+}
+inline void poly_mul_idx(RNSPoly& r, const RNSPoly& a, const RNSPoly& b, const Base& B, const std::vector<size_t>& idx) {
+  par_for(idx.size(), [&](size_t j) { size_t i = idx[j]; hx::EltwiseMultMod(r.limb(i), a.limb(i), b.limb(i), a.N, B.q[i], 1); });
+}
+inline void poly_mul_acc_idx(RNSPoly& r, const RNSPoly& a, const RNSPoly& b, RNSPoly& tmp, const Base& B, const std::vector<size_t>& idx) {
+  par_for(idx.size(), [&](size_t j) { size_t i = idx[j];
+    hx::EltwiseMultMod(tmp.limb(i), a.limb(i), b.limb(i), a.N, B.q[i], 1);
+    hx::EltwiseAddMod(r.limb(i), r.limb(i), tmp.limb(i), a.N, B.q[i]); });
+}
 // chunk-parallel scalar-FMA / sub / reduce on single limbs (used by Garner passes)
 inline void fma_c(u64* r, const u64* a, u64 sc, const u64* b, size_t N, u64 q, u64 f) {
   par_chunks(N, [&](size_t lo, size_t len) { hx::EltwiseFMAMod(r + lo, a + lo, sc, b ? b + lo : nullptr, len, q, f); });
@@ -263,55 +278,55 @@ inline void poly_from_signed(RNSPoly& r, const int64_t* coeffs, const Base& B) {
 }
 
 // ------------------------------------------------------------- Garner
-// In-place mixed-radix (Garner) digits of the value represented by limbs
-// [lo, lo+k) of `x` (base B restricted to those primes). After the call,
-// limb lo+i holds digit d_i (< q_{lo+i}) with
-//   value = sum_i d_i * prod_{j<i} q_{lo+j}.
-// Requires the primes of the sub-base to be within a factor 2 of each other
-// (all digits < 2 * any prime), which our parameter choice guarantees.
+// Mixed-radix (Garner) digits of the value represented by the limbs
+// `idx[0..k)` of `x` (sub-base of B).  In place: limb idx[i] afterwards holds
+// digit d_i (< q_{idx[i]}) with   value = sum_i d_i * prod_{j<i} q_{idx[j]}.
+// Requirements: all primes of the sub-base except possibly the FIRST one lie
+// within a factor 2 of each other (every digit is < 2 * every later prime);
+// the first prime may be small (alpha).
 struct GarnerTables {
-  // for sub-base [lo,hi) of B: inv[i], qm[i][j] = q_{lo+j} mod q_{lo+i}
-  size_t lo = 0, k = 0;
-  std::vector<u64> inv;
-  std::vector<std::vector<u64>> qm;
+  std::vector<size_t> idx;
+  std::vector<u64> inv;                 // (prod_{j<i} q_j)^{-1} mod q_i
+  std::vector<std::vector<u64>> qm;     // qm[i][j] = q_j mod q_i  (sub-base indices)
   GarnerTables() = default;
-  GarnerTables(const Base& B, size_t lo_, size_t hi) : lo(lo_), k(hi - lo_) {
+  GarnerTables(const Base& B, const std::vector<size_t>& idx_) : idx(idx_) {
+    size_t k = idx.size();
     inv.resize(k); qm.assign(k, std::vector<u64>(k));
     for (size_t i = 0; i < k; i++) {
-      u64 qi = B.q[lo + i], prod = 1;
-      for (size_t j = 0; j < i; j++) prod = mulmod(prod, B.q[lo + j] % qi, qi);
+      u64 qi = B.q[idx[i]], prod = 1;
+      for (size_t j = 0; j < i; j++) prod = mulmod(prod, B.q[idx[j]] % qi, qi);
       inv[i] = invmod(prod, qi);
-      for (size_t j = 0; j < k; j++) qm[i][j] = B.q[lo + j] % qi;
+      for (size_t j = 0; j < k; j++) qm[i][j] = B.q[idx[j]] % qi;
     }
   }
+  size_t k() const { return idx.size(); }
 };
 
 inline void garner_inplace(RNSPoly& x, const Base& B, const GarnerTables& G, u64* tmp) {
-  size_t N = x.N, lo = G.lo;
-  for (size_t i = 1; i < G.k; i++) {
-    u64 qi = B.q[lo + i];
+  size_t N = x.N;
+  for (size_t i = 1; i < G.k(); i++) {
+    u64 qi = B.q[G.idx[i]];
     // t = Horner(d_{i-1}, ..., d_0) mod qi
-    memcpy(tmp, x.limb(lo + i - 1), 8 * N);
+    memcpy(tmp, x.limb(G.idx[i - 1]), 8 * N);
     if (i >= 2) {
       for (size_t j = i - 1; j-- > 0;)
-        fma_c(tmp, tmp, G.qm[i][j], x.limb(lo + j), N, qi, 2);
+        fma_c(tmp, tmp, G.qm[i][j], x.limb(G.idx[j]), N, qi, 2);
     } else {
       red_c(tmp, tmp, N, qi, 2, 1);
     }
     // d_i = (x_i - t) * inv_i
-    sub_c(x.limb(lo + i), x.limb(lo + i), tmp, N, qi);
-    fma_c(x.limb(lo + i), x.limb(lo + i), G.inv[i], nullptr, N, qi, 1);
+    sub_c(x.limb(G.idx[i]), x.limb(G.idx[i]), tmp, N, qi);
+    fma_c(x.limb(G.idx[i]), x.limb(G.idx[i]), G.inv[i], nullptr, N, qi, 1);
   }
 }
 
-// Reconstruct value from digits (limbs [lo, lo+k) of `d`, base Bsrc) modulo
-// prime t, into `out`.  Horner: v = d_{k-1}; v = v*q_j + d_j.
-// If the target prime t is small (t < 2^50), digits are first reduced mod t
-// with scalar division (they are ~2^58, far above 8t); `scratch` (N words)
-// is then required.
-inline void horner_to(u64* out, const RNSPoly& d, const Base& Bsrc, size_t lo, size_t k, u64 t, u64 in_factor = 2,
+// Reconstruct the value from the digits in limbs G.idx of `d` modulo prime t,
+// into `out` (Horner: v = d_{k-1}; v = v*q_j + d_j).  If t is small
+// (t < 2^40, e.g. alpha) the digits are first Barrett-reduced mod t using
+// `scratch` (N words).
+inline void horner_to(u64* out, const RNSPoly& d, const Base& B, const GarnerTables& G, u64 t, u64 in_factor = 2,
                       u64* scratch = nullptr) {
-  size_t N = d.N;
+  size_t N = d.N, k = G.k();
   bool small = t < (1ull << 40);
   FastMod fm(small ? t : 3);
   auto red = [&](const u64* src) -> const u64* {
@@ -319,108 +334,82 @@ inline void horner_to(u64* out, const RNSPoly& d, const Base& Bsrc, size_t lo, s
     fm.reduce(scratch, src, N);
     return scratch;
   };
-  if (small) { const u64* r = red(d.limb(lo + k - 1)); memcpy(out, r, 8 * N); in_factor = 1; }
-  else red_c(out, d.limb(lo + k - 1), N, t, in_factor, 1);
+  if (small) { const u64* r = red(d.limb(G.idx[k - 1])); memcpy(out, r, 8 * N); in_factor = 1; }
+  else red_c(out, d.limb(G.idx[k - 1]), N, t, in_factor, 1);
   for (size_t j = k - 1; j-- > 0;) {
-    u64 qj = Bsrc.q[lo + j] % t;
-    fma_c(out, out, qj, red(d.limb(lo + j)), N, t, in_factor);
+    u64 qj = B.q[G.idx[j]] % t;
+    fma_c(out, out, qj, red(d.limb(G.idx[j])), N, t, in_factor);
   }
 }
 
 // ---------------------------------------------------------- Rescaler
-// Given base Bfull = [B_keep (k1 primes) | B_drop (k2 primes)] and
-// x in coefficient form over Bfull (integer representative in [0, prod)),
-// compute h = floor((x + D/2)/D) mod prod(B_keep) = round(x / D), where
-// D = prod(B_drop).  Exact.  Output over B_keep (first k1 limbs of `x`).
+// x over the base B (coefficient form, integer representative in [0, prod)),
+// D = product of the primes `drop`:  h = floor((x + D/2)/D) = round(x/D)
+// modulo every prime in `keep`.  Exact.  Output in the `keep` limbs of x; the
+// `drop` limbs are destroyed.
 struct Rescaler {
   const Base* Bf = nullptr;
-  size_t k1 = 0, k2 = 0;
+  std::vector<size_t> keep, drop;
   GarnerTables G;             // Garner over the dropped sub-base
-  std::vector<u64> half_D;    // floor(D/2) mod each prime of Bfull
+  std::vector<u64> half_D;    // floor(D/2) mod each prime of B (by limb index)
   std::vector<u64> Dinv;      // D^{-1} mod each keep prime
   AlignedBuf tmp, tmp2;
   Rescaler() = default;
-  Rescaler(const Base& Bfull, size_t k1_) { init(Bfull, k1_); }
-  void init(const Base& Bfull, size_t k1_) {
-    Bf = &Bfull; k1 = k1_; k2 = Bfull.k() - k1;
-    G = GarnerTables(Bfull, k1, Bfull.k());
+  void init(const Base& Bfull, const std::vector<size_t>& keep_, const std::vector<size_t>& drop_) {
+    Bf = &Bfull; keep = keep_; drop = drop_;
+    G = GarnerTables(Bfull, drop);
     BigUInt D(1);
-    for (size_t j = k1; j < Bfull.k(); j++) D.mul_small(Bfull.q[j]);
+    for (size_t j : drop) D.mul_small(Bfull.q[j]);
     BigUInt H = D; H.divmod_small(2);
     half_D.resize(Bfull.k());
     for (size_t i = 0; i < Bfull.k(); i++) half_D[i] = H.mod_small(Bfull.q[i]);
-    Dinv.resize(k1);
-    for (size_t i = 0; i < k1; i++) Dinv[i] = invmod(D.mod_small(Bfull.q[i]), Bfull.q[i]);
+    Dinv.resize(keep.size());
+    for (size_t m = 0; m < keep.size(); m++) Dinv[m] = invmod(D.mod_small(Bfull.q[keep[m]]), Bfull.q[keep[m]]);
     tmp.alloc(Bfull.N); tmp2.alloc(Bfull.N);
   }
-  // x: coefficient form, all k1+k2 limbs, values in [0,q). Result in limbs [0,k1).
-  // `l` is scratch of N words. Destroys the dropped limbs of x.
   void apply(RNSPoly& x) {
     const Base& B = *Bf;
     size_t N = x.N;
-    par_for(B.k(), [&](size_t i) { hx::EltwiseAddMod(x.limb(i), x.limb(i), half_D[i], N, B.q[i]); });
+    for (size_t i : keep) adds_c(x.limb(i), x.limb(i), half_D[i], N, B.q[i]);
+    for (size_t i : drop) adds_c(x.limb(i), x.limb(i), half_D[i], N, B.q[i]);
     garner_inplace(x, B, G, tmp.p);
-    for (size_t m = 0; m < k1; m++) {
-      u64 qm = B.q[m];
-      horner_to(tmp.p, x, B, k1, k2, qm, 2, tmp2.p);
-      sub_c(x.limb(m), x.limb(m), tmp.p, N, qm);
-      fma_c(x.limb(m), x.limb(m), Dinv[m], nullptr, N, qm, 1);
+    for (size_t m = 0; m < keep.size(); m++) {
+      u64 qm = B.q[keep[m]];
+      horner_to(tmp.p, x, B, G, qm, 2, tmp2.p);
+      sub_c(x.limb(keep[m]), x.limb(keep[m]), tmp.p, N, qm);
+      fma_c(x.limb(keep[m]), x.limb(keep[m]), Dinv[m], nullptr, N, qm, 1);
     }
   }
 };
 
 // ---------------------------------------------------------- Lifter
-// Exact base extension: value h in [0, prod(B_small)) given over the first
-// k1 limbs of Bfull, extend to all limbs of Bfull (coefficient form).
+// Exact base extension: the value h in [0, prod(src primes)) given in the
+// `src` limbs of a poly over B is extended to the `tgt` limbs.
 struct Lifter {
   const Base* Bf = nullptr;
-  size_t k1 = 0;
+  std::vector<size_t> src, tgt;
   GarnerTables G;
+  Base srcB;                 // compact view of the source primes (no NTT tables)
   AlignedBuf tmp, tmp2;
-  RNSPoly d;                 // digit scratch (allocated once)
+  RNSPoly d;                 // digit scratch (limb i = source limb src[i])
   Lifter() = default;
-  Lifter(const Base& Bfull, size_t k1_) { init(Bfull, k1_); }
-  void init(const Base& Bfull, size_t k1_) {
-    Bf = &Bfull; k1 = k1_;
-    G = GarnerTables(Bfull, 0, k1);
-    tmp.alloc(k1 * Bfull.N); tmp2.alloc(Bfull.N);
-    d = RNSPoly(k1, Bfull.N);
+  void init(const Base& Bfull, const std::vector<size_t>& src_, const std::vector<size_t>& tgt_) {
+    Bf = &Bfull; src = src_; tgt = tgt_;
+    std::vector<size_t> local(src.size()); for (size_t i = 0; i < src.size(); i++) local[i] = i;
+    srcB.N = Bfull.N; srcB.q.clear(); for (size_t i : src) srcB.q.push_back(Bfull.q[i]);
+    G = GarnerTables(srcB, local);
+    tmp.alloc(Bfull.N); tmp2.alloc(Bfull.N);
+    d = RNSPoly(src.size(), Bfull.N);
   }
-  // src: limbs [0,k1) hold h (coefficient form). dst: all limbs of Bfull.
-  // src and dst may alias (same RNSPoly) if dst has k = Bfull.k().
-  void apply(const RNSPoly& src, RNSPoly& dst, size_t kout = 0) {
+  // a: poly over B holding the value in its src limbs; dst: poly over B receiving the tgt limbs (may be the same poly)
+  void apply(const RNSPoly& a, RNSPoly& dst) {
     const Base& B = *Bf;
-    size_t N = src.N;
-    if (kout == 0) kout = B.k();
-    for (size_t i = 0; i < k1; i++) memcpy(d.limb(i), src.limb(i), 8 * N);
-    garner_inplace(d, B, G, tmp.p);
-    for (size_t t = k1; t < kout; t++) horner_to(dst.limb(t), d, B, 0, k1, B.q[t], 2, tmp2.p);
-    if (&src != &dst) for (size_t i = 0; i < k1; i++) memcpy(dst.limb(i), src.limb(i), 8 * N);
-  }
-  // Extend h (first k1 limbs of src over Bfull) to an arbitrary target base
-  // Btgt (all of its primes), writing dst over Btgt.
-  void apply_to(const RNSPoly& src, RNSPoly& dst, const Base& Btgt) {
-    const Base& B = *Bf;
-    size_t N = src.N;
-    for (size_t i = 0; i < k1; i++) memcpy(d.limb(i), src.limb(i), 8 * N);
-    garner_inplace(d, B, G, tmp.p);
-    for (size_t t = 0; t < Btgt.k(); t++) horner_to(dst.limb(t), d, B, 0, k1, Btgt.q[t], 2, tmp2.p);
+    size_t N = a.N;
+    for (size_t i = 0; i < src.size(); i++) memcpy(d.limb(i), a.limb(src[i]), 8 * N);
+    garner_inplace(d, srcB, G, tmp.p);
+    for (size_t t : tgt) horner_to(dst.limb(t), d, srcB, G, B.q[t], 2, tmp2.p);
+    if (&a != &dst) for (size_t i : src) memcpy(dst.limb(i), a.limb(i), 8 * N);
   }
 };
-
-// Reduce the value (given as coefficient-form limbs [0,k) of x over base B)
-// modulo a small prime t (e.g. alpha). Non-destructive.
-inline void poly_mod_small(u64* out, const RNSPoly& x, const Base& B, size_t k, u64 t, AlignedBuf& scratch) {
-  size_t N = x.N;
-  RNSPoly d(k, N);
-  for (size_t i = 0; i < k; i++) memcpy(d.limb(i), x.limb(i), 8 * N);
-  GarnerTables G(B, 0, k);
-  garner_inplace(d, B, G, scratch.p);
-  // digits are ~2^58, far above t^2: Barrett-reduce them first
-  FastMod fm(t);
-  for (size_t i = 0; i < k; i++) fm.reduce(d.limb(i), d.limb(i), N);
-  memcpy(out, d.limb(k - 1), 8 * N);
-  for (size_t j = k - 1; j-- > 0;) hx::EltwiseFMAMod(out, out, B.q[j] % t, d.limb(j), N, t, 1);
-}
 
 }  // namespace pcf

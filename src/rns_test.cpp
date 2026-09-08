@@ -1,5 +1,5 @@
-// Dumps random RNS values and the results of Rescaler / Lifter / poly_mod_small
-// so that check_rns.py can verify them against Python big integers.
+// Dumps random RNS values and the results of the exact rescalers / lifter so
+// that check_rns.py can verify them against Python big integers.
 #include "pcf.hpp"
 using namespace pcf;
 int main() {
@@ -9,29 +9,35 @@ int main() {
   FILE* f = fopen("rns_dump.txt", "w");
   fprintf(f, "primes");
   for (u64 q : C.Bg.q) fprintf(f, " %lu", q);
-  fprintf(f, "\nkb %zu kg %zu alpha %lu\n", C.kb, C.kg, C.P.alpha);
+  fprintf(f, "\nkb %zu ka %zu kg %zu kQs %zu\n", C.kb, C.ka, C.kg, C.idx_Qs.size());
   const size_t J = 64;  // coefficients to dump
-  // ---- rescale
+  // ---- InpMemMult rescale: keep beta, drop alpha*Q~
   RNSPoly x(C.kg, C.N); sample_uniform(x, C.Bg, rng);
   RNSPoly xin = x;
   C.resc_g.apply(x);
   for (size_t j = 0; j < J; j++) {
-    fprintf(f, "rescale");
+    fprintf(f, "rescale_g");
     for (size_t l = 0; l < C.kg; l++) fprintf(f, " %lu", xin.limb(l)[j]);
     for (size_t l = 0; l < C.kb; l++) fprintf(f, " %lu", x.limb(l)[j]);
     fprintf(f, "\n");
   }
-  // ---- lift (input: kb limbs uniform), also mod alpha
+  // ---- Output rescale: keep alpha, drop beta*Q_s
+  sample_uniform(x, C.Bg, rng); xin = x;
+  C.resc_o.apply(x);
+  for (size_t j = 0; j < J; j++) {
+    fprintf(f, "rescale_o");
+    for (size_t l = 0; l < C.kg; l++) fprintf(f, " %lu", xin.limb(l)[j]);
+    fprintf(f, " %lu\n", x.limb(C.ka)[j]);
+  }
+  // ---- lift beta -> all limbs
   RNSPoly h(C.kg, C.N); sample_uniform(h, C.Bg, rng);
   RNSPoly hin = h;
   C.lift_g.apply(h, h);
-  AlignedBuf ma(C.N);
-  poly_mod_small(ma.p, hin, C.Bg, C.kb, C.P.alpha, C.scratch);
   for (size_t j = 0; j < J; j++) {
     fprintf(f, "lift");
     for (size_t l = 0; l < C.kb; l++) fprintf(f, " %lu", hin.limb(l)[j]);
     for (size_t l = 0; l < C.kg; l++) fprintf(f, " %lu", h.limb(l)[j]);
-    fprintf(f, " %lu\n", ma.p[j]);
+    fprintf(f, "\n");
   }
   // ---- NTT round trip / slot packing sanity
   std::vector<u64> s(C.N), c(C.N), s2(C.N);

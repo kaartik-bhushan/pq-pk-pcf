@@ -1,0 +1,72 @@
+=== flags: 
+Params: N=32768 n=1024 alpha=65537  log2(beta)=290 log2(gamma)=771 log2(gamma_o)=771 log2(beta')=116 log2(p)=290  (limbs beta/gamma/beta'/p = 5/14/2/5; output limbs 14)
+  memory-share invariants: OK, RMS values: OK, output shares: OK
+    ntt                         77.89
+    output-lift                 15.40
+    output-round               145.90
+    TOTAL                      337.12
+    ntt                         76.21
+    output-lift                 14.79
+    output-round               176.58
+    TOTAL                      445.26
+RESULT: N=32768 slots/eval, party0 339.4 ms/eval, party1 447.7 ms/eval
+        OTs/s (1 thread per party, bounded by the slower party): 73196   [party0 alone: 96533, party1 alone: 73196]
+=== flags: --ifma
+Params: N=32768 n=1024 alpha=65537  log2(beta)=300 log2(gamma)=767 log2(gamma_o)=767 log2(beta')=150 log2(p)=300  (limbs beta/gamma/beta'/p = 6/16/3/6; output limbs 16)
+  memory-share invariants: OK, RMS values: OK, output shares: OK
+    ntt                         82.74
+    output-lift                 16.94
+    output-round               161.15
+    TOTAL                      373.58
+    ntt                         82.79
+    output-lift                 18.06
+    output-round               186.39
+    TOTAL                      473.96
+RESULT: N=32768 slots/eval, party0 376.4 ms/eval, party1 476.8 ms/eval
+        OTs/s (1 thread per party, bounded by the slower party): 68725   [party0 alone: 87060, party1 alone: 68725]
+=== flags: --ifma --kQs 7
+Params: N=32768 n=1024 alpha=65537  log2(beta)=300 log2(gamma)=767 log2(gamma_o)=667 log2(beta')=150 log2(p)=300  (limbs beta/gamma/beta'/p = 6/16/3/6; output limbs 14)
+  memory-share invariants: OK, RMS values: OK, output shares: OK
+    ntt                         78.91
+    output-lift                 14.20
+    output-round               129.52
+    TOTAL                      332.02
+    ntt                         76.99
+    output-lift                 14.37
+    output-round               150.98
+    TOTAL                      421.07
+RESULT: N=32768 slots/eval, party0 334.8 ms/eval, party1 423.9 ms/eval
+        OTs/s (1 thread per party, bounded by the slower party): 77309   [party0 alone: 97881, party1 alone: 77309]
+=== flags: --kQs 1
+Params: N=32768 n=1024 alpha=65537  log2(beta)=290 log2(gamma)=771 log2(gamma_o)=365 log2(beta')=116 log2(p)=290  (limbs beta/gamma/beta'/p = 5/14/2/5; output limbs 7)
+  memory-share invariants: OK, RMS values: OK, output shares: OK
+    output-lift                  8.08
+    output-round                58.36
+    TOTAL                      238.84
+    output-lift                  8.07
+    output-round                70.61
+    TOTAL                      322.63
+RESULT: N=32768 slots/eval, party0 241.2 ms/eval, party1 324.9 ms/eval
+        OTs/s (1 thread per party, bounded by the slower party): 100858   [party0 alone: 135882, party1 alone: 100858]
+=== flags: --ifma --kQs 1
+Params: N=32768 n=1024 alpha=65537  log2(beta)=300 log2(gamma)=767 log2(gamma_o)=367 log2(beta')=150 log2(p)=300  (limbs beta/gamma/beta'/p = 6/16/3/6; output limbs 8)
+  memory-share invariants: OK, RMS values: OK, output shares: OK
+    output-lift                  9.04
+    output-round                71.82
+    TOTAL                      301.80
+    output-lift                  9.47
+    output-round                82.62
+    TOTAL                      388.21
+RESULT: N=32768 slots/eval, party0 304.8 ms/eval, party1 391.1 ms/eval
+        OTs/s (1 thread per party, bounded by the slower party): 83778   [party0 alone: 107491, party1 alone: 83778]
+=== flags: --ifma --kQs 1 --threads 2
+Params: N=32768 n=1024 alpha=65537  log2(beta)=300 log2(gamma)=767 log2(gamma_o)=367 log2(beta')=150 log2(p)=300  (limbs beta/gamma/beta'/p = 6/16/3/6; output limbs 8)
+  memory-share invariants: OK, RMS values: OK, output shares: OK
+    output-lift                  6.09
+    output-round                41.99
+    TOTAL                      189.89
+    output-lift                  6.51
+    output-round                49.68
+    TOTAL                      223.95
+RESULT: N=32768 slots/eval, party0 192.4 ms/eval, party1 226.4 ms/eval
+        OTs/s (2 threads per party, bounded by the slower party): 144727   [party0 alone: 170302, party1 alone: 144727]

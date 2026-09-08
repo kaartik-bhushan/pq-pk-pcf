@@ -37,14 +37,14 @@ static bool check_invariants(Context& C, const SecretKey0& sk0, Evaluator0& E0, 
 static bool check_values(Context& C, Evaluator1& E1, const Output1& o1) {
   size_t bad = 0;
   for (size_t i = 0; i < C.N; i++) {
-    bool p0 = E1.mem[CELL_P].gs.p[i] == 0, p1 = E1.mem[CELL_PB].gs.p[i] == 0;
+    bool p0 = E1.mem[CELL_P].g.limb(C.ka)[i] == 0, p1 = E1.mem[CELL_PB].g.limb(C.ka)[i] == 0;
     if (p0 == p1 || p0 != (o1.b[i] == 0)) bad++;
   }
   if (bad) printf("  value check FAIL: %zu slots\n", bad);
   return bad == 0;
 }
 
-// Debug: output shares satisfy y_0 - y_1 = s_l * P_l and Y_0^(j) - Y_1^(j) = theta^(j)_l * P_l
+// Debug: output shares satisfy y_0 - y_1 = s_l * P_l and Y_0^(j) - Y_1^(j) = Delta^(j)_l * P_l
 // (mod alpha) in every slot, for both branches.
 static bool check_outputs(Context& C, const SecretKey0& sk0, Evaluator0& E0, Evaluator1& E1) {
   size_t N = C.N; u64 al = C.P.alpha;
@@ -56,13 +56,13 @@ static bool check_outputs(Context& C, const SecretKey0& sk0, Evaluator0& E0, Eva
   };
   size_t bad = 0;
   for (int b = 0; b < 2; b++) {
-    const u64* P = E1.mem[b == 0 ? CELL_P : CELL_PB].gs.p;
+    const u64* P = E1.mem[b == 0 ? CELL_P : CELL_PB].g.limb(C.ka);
     std::vector<u64> ss = slots_of(sk0.s);
     size_t b0 = 0, bnz = 0;
     for (size_t i = 0; i < N; i++)
       if ((E0.dbg_y[b][i] + al - E1.dbg_y[b][i]) % al != (ss[i] * P[i]) % al) { bad++; b0++; }
     for (int j = 0; j < 7; j++) {
-      std::vector<u64> th = slots_of(sk0.theta[j]);
+      std::vector<u64> th(N); C.to_slots(th.data(), sk0.delta[j].data());
       size_t bj = 0, off1 = 0;
       for (size_t i = 0; i < N; i++) {
         u64 got = (E0.dbg_ys[b][j * N + i] + al - E1.dbg_ys[b][j * N + i]) % al, want = (th[i] * P[i]) % al;
@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
       if (memcmp(ro, o1.r.data() + 16 * i, 16) == 0) {
         coll++;
         if (coll <= 2) {
-          printf("  collision at slot %zu (b=%d): P slots %lu %lu | ys0: ", i, o1.b[i], E1.mem[CELL_P].gs.p[i], E1.mem[CELL_PB].gs.p[i]);
+          printf("  collision at slot %zu (b=%d): P slots %lu %lu | ys0: ", i, o1.b[i], E1.mem[CELL_P].g.limb(C.ka)[i], E1.mem[CELL_PB].g.limb(C.ka)[i]);
           for (int j = 0; j < 7; j++) printf("%lu ", E0.dbg_ys[(1 - o1.b[i])][j * C.N + i]);
           printf("y0=%lu | ys1: ", E0.dbg_y[(1 - o1.b[i])][i]);
           for (int j = 0; j < 7; j++) printf("%lu ", E1.dbg_ys[o1.b[i]][j * C.N + i]);

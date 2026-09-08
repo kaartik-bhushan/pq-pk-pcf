@@ -1,34 +1,26 @@
 // Packed public-key PCF for OT (Construction 5), instantiated with
 //   * Construction 2 (succinct half-chosen VOLE with local reconstruction),
-//   * Construction 4 (compact lattice-based packed primitive, SP-RLWE + KDM),
+//   * Construction 4 (compact lattice-based packed public-key aHMAC:
+//     SP-RLWE public samples, KDM-Enc1, KDM-Enc-Pack, InpMemMult, rounded Output),
 //   * the XOR5-MAJ7 GAR-wPRF written as an RMS program (Section 8).
 //
-// Moduli (all limbs are 58-bit NTT-friendly primes, q = 1 mod 2^16):
-//   alpha = 65537  (plaintext / packing modulus, splits X^N+1 into N linear factors)
-//   beta  = prod of k_beta primes      (memory-share modulus,  ~2^290)
-//   gamma = beta * Q, Q = prod of k_Q primes (input-share modulus, ~2^754)
-//   beta' = prod of the first k_betap beta-primes (~2^116): modulus of the
-//           VOLE output shares, i.e. of the memory shares of the *inputs*.
-//           These shares must be small (<< beta) because the error term
-//           e * z1 of a converted input share (Lemma 5) is multiplied by the
-//           memory value g in every multiplication (Lemma 7).
-//   p     = beta' * Q', Q' = prod of k_Qp primes (VOLE modulus, ~2^290)
-//   gamma'= alpha * Q_s, Q_s = prod of the first k_Qs Q-primes (~2^364):
-//           modulus of the "theta-conversion" ciphertexts used by the output
-//           stage (see theta_outputs below).
-// Rounding  floor(x)_{gamma/beta} = round(x / Q)   is exact RNS rescaling.
+// Moduli (all limbs except alpha are NTT-friendly primes of `prime_bits` bits,
+// q = 1 mod 2^16; alpha = 65537 is itself a limb):
+//   alpha  = 65537                      packing modulus (X^N+1 splits into N linear factors)
+//   beta   = prod of k_beta primes      memory-share modulus                    (~2^290)
+//   gamma  = beta * alpha * Q~          input-share modulus, Q~ = k_Q primes     (~2^770)
+//   beta'  = first k_betap beta-primes  modulus of the VOLE output shares        (~2^116)
+//   p      = beta' * Q'                 VOLE modulus, Q' = k_Qp primes           (~2^290)
+// Because alpha | gamma, floor(gamma/alpha) = beta * Q~ and floor(gamma/beta) =
+// alpha * Q~ are exact, and both roundings of the construction,
+//   floor(x)_{gamma/beta} = round(x / (alpha Q~))   (InpMemMult, keeps the beta limbs)
+//   floor(x)_{gamma/alpha} = round(x / (beta Q~))   (Output, keeps the alpha limb)
+// are exact RNS rescalings.  Optionally (k_Qs < k_Q) the KDM-Enc-Pack
+// ciphertexts and the Output rounding use the divisor gamma_o = alpha * beta *
+// Q_s of gamma (Q_s = first k_Qs primes of Q~), i.e. the same construction over
+// a smaller modulus; the default is gamma_o = gamma (the literal construction).
 //
-// Output stage.  The paper's Output step (Construction 4) sets
-// Y^(j) = -M_1 * v1^(j) (mod alpha), which makes party 0's whole 8-tuple a
-// function of the single F_alpha slot value of its share M_1 (16 bits of
-// entropy from party 1's point of view; both branches also collide with
-// probability 1/alpha per slot).  We instead realise Definition 15 literally:
-// party 0 publishes RLWE ciphertexts (v1^(j), v2^(j)) of theta^(j) * Q_s under
-// s (modulus gamma'), and both parties run one InpMemMult-style step
-//     Y_0^(j) = round(-M_01 v1 + r)/Q_s ,  Y_1^(j) = round(-M_11 v1 - g v2 + r)/Q_s   (mod alpha)
-// which yields Y_0^(j) - Y_1^(j) = theta^(j) * P  (mod alpha), exactly as in
-// Lemma 7 with the input share (v1, v2) of "theta^(j)/s".  Party 0's tuple
-// then depends on the 8 independent slot secrets (s, theta^(1..7)).
+// RNS limb layout of a gamma-element: [beta_1..beta_kb | alpha | Q~_1..Q~_kQ].
 #pragma once
 #include "rns.hpp"
 #include "sampling.hpp"
@@ -43,14 +35,15 @@ struct Params {
   size_t N = 1 << 15;      // ring dimension d (= number of packed OT slots)
   size_t n = 4900;         // wPRF key length (perfect square)
   u64 alpha = 65537;
-  size_t k_beta = 5, k_Q = 8, k_betap = 2, k_Qp = 3, k_Qs = 6;
+  size_t k_beta = 5, k_Q = 8, k_betap = 2, k_Qp = 3;
+  size_t k_Qs = 0;         // 0 = all of Q~ (literal construction); k < k_Q: Output stage over gamma_o = alpha*beta*Q_s
   size_t prime_bits = 58;  // all RNS primes lie in (2^(prime_bits-1), 2^prime_bits); use 50 on AVX512-IFMA CPUs
-  // Preset for AVX512-IFMA machines (HEXL uses ~2x faster IFMA kernels for moduli < 2^50):
-  void use_ifma_preset() { prime_bits = 50; k_beta = 6; k_Q = 9; k_betap = 3; k_Qp = 3; k_Qs = 7; }
   int eta = 21;            // CBD parameter: |e| <= 21 = B_e
-  size_t n_rand_limbs = 2; // how many Q-limbs of the shared PRF value r are randomised
+  size_t n_rand_limbs = 2; // how many Q~-limbs of the shared PRF value r are randomised (InpMemMult)
   bool eager0 = true;      // precompute party-0 memory shares at KeyDer
   size_t sqrt_n() const { return (size_t)std::lround(std::sqrt((double)n)); }
+  // Preset for AVX512-IFMA machines (HEXL uses ~2x faster kernels for moduli < 2^50):
+  void use_ifma_preset() { prime_bits = 50; k_beta = 6; k_Q = 9; k_betap = 3; k_Qp = 3; }
 };
 
 // ----------------------------------------------------------------- timing
@@ -74,59 +67,66 @@ struct Timer {
 // ----------------------------------------------------------------- context
 struct Context {
   Params P;
-  size_t N, kb, kg, kbp, kp, ko;   // limb counts: beta, gamma, beta', p, gamma'
+  size_t N, kb, kg, kbp, kp, ka;         // limb counts: beta, gamma, beta', p; ka = index of the alpha limb (= kb)
   std::vector<u64> primes;
-  Base Bg;                 // [beta | Q]
+  Base Bg;                 // [beta | alpha | Q~]
   Base Bp;                 // [beta' | Q']
-  Base Bo;                 // [alpha | Q_s]
-  std::unique_ptr<NTT> ntt_alpha;
-  Rescaler resc_g, resc_p, resc_o;
-  Lifter lift_g;           // beta (kb limbs) -> gamma
-  Lifter lift_s;           // beta' (kbp limbs) -> kbp+1 limbs (exact sums of up to 7 input shares)
-  Lifter lift_m;           // kbp+1 limbs -> gamma
-  Lifter lift_o;           // beta (kb limbs) -> gamma' (via apply_to)
-  std::vector<u64> Q_mod_g;              // Q mod q_i, i over Bg
-  std::vector<u64> Qp_mod_p;             // Q' mod q_i, i over Bp
-  std::vector<u64> Qs_mod_o;             // Q_s mod q_i, i over Bo
+  std::vector<size_t> idx_beta, idx_Q, idx_Qs, idx_o, idx_drop_rms, idx_drop_out, idx_all;
+  Rescaler resc_g;         // round(x / (alpha Q~))         -> beta limbs      (InpMemMult)
+  Rescaler resc_p;         // round(x / Q')                  -> beta' limbs     (VOLE Recon)
+  Rescaler resc_o;         // round(x / (beta Q_s))          -> alpha limb      (Output)
+  Lifter lift_g;           // beta limbs -> all limbs
+  Lifter lift_s;           // beta' limbs -> limb kbp (exact sums of up to 7 input shares fit in kbp+1 limbs)
+  Lifter lift_m;           // kbp+1 limbs -> all limbs
+  Lifter lift_o;           // beta limbs -> {alpha} u Q_s limbs (Output stage)
+  std::vector<u64> Q_mod_g;              // floor(gamma/beta) = alpha Q~ mod q_i
+  std::vector<u64> Qp_mod_p;             // Q' mod q_i over Bp
+  std::vector<u64> payload_mod_g;        // floor(gamma_o/alpha) = beta Q_s mod q_i   (KDM-Enc-Pack payload scale)
   AlignedBuf scratch;
   FastMod fma;                           // fast reduction mod alpha
 
   explicit Context(const Params& p) : P(p), fma(p.alpha) {
-    N = P.N; kb = P.k_beta; kg = kb + P.k_Q; kbp = P.k_betap; kp = kbp + P.k_Qp; ko = 1 + P.k_Qs;
-    if (P.k_Qs > P.k_Q) throw std::runtime_error("k_Qs must not exceed k_Q");
+    N = P.N; kb = P.k_beta; kbp = P.k_betap; kp = kbp + P.k_Qp; ka = kb; kg = kb + 1 + P.k_Q;
     if (kbp + 1 > kb) throw std::runtime_error("k_beta must exceed k_betap");
+    size_t kQs = P.k_Qs == 0 ? P.k_Q : P.k_Qs;
+    if (kQs > P.k_Q) throw std::runtime_error("k_Qs must not exceed k_Q");
     size_t total = kb + P.k_Q + P.k_Qp;
     primes = hx::GeneratePrimes(total, P.prime_bits - 1, false, N);  // HEXL: largest primes below 2^prime_bits
     for (u64 q : primes) if (q <= (1ull << (P.prime_bits - 1)) || q >= (1ull << P.prime_bits)) throw std::runtime_error("prime size");
     std::vector<u64> beta(primes.begin(), primes.begin() + kb);
-    std::vector<u64> Qv(primes.begin() + kb, primes.begin() + kg);
-    std::vector<u64> Qpv(primes.begin() + kg, primes.end());
-    std::vector<u64> g = beta; g.insert(g.end(), Qv.begin(), Qv.end());
+    std::vector<u64> Qv(primes.begin() + kb, primes.begin() + kb + P.k_Q);
+    std::vector<u64> Qpv(primes.begin() + kb + P.k_Q, primes.end());
+    std::vector<u64> g = beta; g.push_back(P.alpha); g.insert(g.end(), Qv.begin(), Qv.end());
     std::vector<u64> pp(beta.begin(), beta.begin() + kbp); pp.insert(pp.end(), Qpv.begin(), Qpv.end());
-    std::vector<u64> ov(1, P.alpha); ov.insert(ov.end(), Qv.begin(), Qv.begin() + P.k_Qs);
     Bg.init(N, g);
     Bp.init(N, pp);
-    Bo.init(N, ov);
-    ntt_alpha = std::make_unique<NTT>(N, P.alpha);
-    resc_g.init(Bg, kb);
-    resc_p.init(Bp, kbp);
-    resc_o.init(Bo, 1);
-    lift_o.init(Bg, kb);
-    lift_g.init(Bg, kb);
-    lift_s.init(Bg, kbp);
-    lift_m.init(Bg, kbp + 1);
-    BigUInt Q(1); for (u64 q : Qv) Q.mul_small(q);
+    // index sets
+    for (size_t i = 0; i < kb; i++) idx_beta.push_back(i);
+    for (size_t i = kb + 1; i < kg; i++) idx_Q.push_back(i);
+    idx_Qs.assign(idx_Q.begin(), idx_Q.begin() + kQs);
+    for (size_t i = 0; i < kg; i++) idx_all.push_back(i);
+    idx_drop_rms.push_back(ka); idx_drop_rms.insert(idx_drop_rms.end(), idx_Q.begin(), idx_Q.end());
+    idx_drop_out = idx_beta; idx_drop_out.insert(idx_drop_out.end(), idx_Qs.begin(), idx_Qs.end());
+    idx_o.push_back(ka); idx_o.insert(idx_o.end(), idx_drop_out.begin(), idx_drop_out.end());
+    resc_g.init(Bg, idx_beta, idx_drop_rms);
+    resc_o.init(Bg, {ka}, idx_drop_out);
+    { std::vector<size_t> keep, drop; for (size_t i = 0; i < kbp; i++) keep.push_back(i); for (size_t i = kbp; i < kp; i++) drop.push_back(i); resc_p.init(Bp, keep, drop); }
+    lift_g.init(Bg, idx_beta, idx_drop_rms);
+    { std::vector<size_t> src; for (size_t i = 0; i < kbp; i++) src.push_back(i); lift_s.init(Bg, src, {kbp}); }
+    { std::vector<size_t> src, tgt; for (size_t i = 0; i <= kbp; i++) src.push_back(i); for (size_t i = kbp + 1; i < kg; i++) tgt.push_back(i); lift_m.init(Bg, src, tgt); }
+    { std::vector<size_t> tgt = {ka}; tgt.insert(tgt.end(), idx_Qs.begin(), idx_Qs.end()); lift_o.init(Bg, idx_beta, tgt); }
+    BigUInt Qg(P.alpha); for (u64 q : Qv) Qg.mul_small(q);                 // gamma / beta
     BigUInt Qp(1); for (u64 q : Qpv) Qp.mul_small(q);
-    BigUInt Qs(1); for (size_t i = 0; i < P.k_Qs; i++) Qs.mul_small(Qv[i]);
-    Qs_mod_o.resize(ko); for (size_t i = 0; i < ko; i++) Qs_mod_o[i] = Qs.mod_small(Bo.q[i]);
-    BigUInt gamma(1); for (u64 q : g) gamma.mul_small(q);
-    Q_mod_g.resize(kg); for (size_t i = 0; i < kg; i++) Q_mod_g[i] = Q.mod_small(Bg.q[i]);
+    BigUInt pay(1); for (u64 q : beta) pay.mul_small(q); for (size_t i : idx_Qs) pay.mul_small(Bg.q[i]);   // gamma_o / alpha
+    Q_mod_g.resize(kg); for (size_t i = 0; i < kg; i++) Q_mod_g[i] = Qg.mod_small(Bg.q[i]);
     Qp_mod_p.resize(kp); for (size_t i = 0; i < kp; i++) Qp_mod_p[i] = Qp.mod_small(Bp.q[i]);
+    payload_mod_g.resize(kg); for (size_t i = 0; i < kg; i++) payload_mod_g[i] = pay.mod_small(Bg.q[i]);
     scratch.alloc(N);
     BigUInt betaB(1); for (u64 q : beta) betaB.mul_small(q);
     BigUInt betapB(1); for (size_t i = 0; i < kbp; i++) betapB.mul_small(beta[i]);
-    printf("Params: N=%zu n=%zu alpha=%lu  log2(beta)=%zu log2(gamma)=%zu log2(beta')=%zu log2(p)=%zu log2(gamma')=%zu  (limbs beta/gamma/beta'/p/gamma' = %zu/%zu/%zu/%zu/%zu)\n",
-           N, P.n, P.alpha, betaB.bits(), gamma.bits(), betapB.bits(), Bp.product().bits(), Bo.product().bits(), kb, kg, kbp, kp, ko);
+    BigUInt gamma = Bg.product(), gamma_o = pay; gamma_o.mul_small(P.alpha);
+    printf("Params: N=%zu n=%zu alpha=%lu  log2(beta)=%zu log2(gamma)=%zu log2(gamma_o)=%zu log2(beta')=%zu log2(p)=%zu  (limbs beta/gamma/beta'/p = %zu/%zu/%zu/%zu; output limbs %zu)\n",
+           N, P.n, P.alpha, betaB.bits(), gamma.bits(), gamma_o.bits(), betapB.bits(), Bp.product().bits(), kb, kg, kbp, kp, idx_o.size());
   }
 
   // NTT-domain polynomial from small signed coefficients, over base B.
@@ -136,23 +136,22 @@ struct Context {
   RNSPoly ntt_of_small(const u64* c, const Base& B) const {
     RNSPoly r(B.k(), N); poly_from_small(r, c, B); poly_ntt(r, B); return r;
   }
-  // Shared PRF r = PRF(K, id): adds uniform values to the first n_rand_limbs
-  // Q-limbs (indices kb .. kb+n_rand_limbs) of x (coefficient form, base Bg).
-  void add_prf(RNSPoly& x, const AES128& prf, u64 id) { add_prf(x, prf, id, Bg, kb); }
-  void add_prf(RNSPoly& x, const AES128& prf, u64 id, const Base& B, size_t first) {
+  // Shared PRF r = PRF(K, id) (Construction 4, InpMemMult): adds uniform values
+  // to the first n_rand_limbs Q~-limbs of x (coefficient form, base Bg).
+  void add_prf(RNSPoly& x, const AES128& prf, u64 id) {
     const u64 mask = (1ull << P.prime_bits) - 1;
     for (size_t l = 0; l < P.n_rand_limbs; l++) {
-      size_t i = first + l;
+      size_t i = idx_Q[l];
       u64* t = scratch.p;
       prf.ctr_fill(reinterpret_cast<uint8_t*>(t), 8 * N, (id << 8) | i, 0);
       for (size_t j = 0; j < N; j++) t[j] &= mask;
-      hx::EltwiseReduceMod(t, t, N, B.q[i], 2, 1);
-      hx::EltwiseAddMod(x.limb(i), x.limb(i), t, N, B.q[i]);
+      hx::EltwiseReduceMod(t, t, N, Bg.q[i], 2, 1);
+      hx::EltwiseAddMod(x.limb(i), x.limb(i), t, N, Bg.q[i]);
     }
   }
   // slots = psi^{-1}(poly mod alpha): forward NTT mod alpha of `coeffs` (values in [0,alpha)).
-  void to_slots(u64* slots, const u64* coeffs) const { ntt_alpha->ComputeForward(slots, coeffs, 1, 1); }
-  void from_slots(u64* coeffs, const u64* slots) const { ntt_alpha->ComputeInverse(coeffs, slots, 1, 1); }
+  void to_slots(u64* slots, const u64* coeffs) const { Bg.ntt[ka]->ComputeForward(slots, coeffs, 1, 1); }
+  void from_slots(u64* coeffs, const u64* slots) const { Bg.ntt[ka]->ComputeInverse(coeffs, slots, 1, 1); }
 };
 
 // =============================================================== keys
@@ -162,13 +161,12 @@ struct PublicKey0 {
   RNSPoly a_p;                  // a in NTT form mod p (from pp)
   std::vector<RNSPoly> A;       // s~_1 : A_j, j in [0, 2 sqrt(n)], NTT mod p
   RNSPoly a_g, u1, u2, u3;      // SP-RLWE public 'a' and KDM-Enc1 outputs, NTT mod gamma
-  RNSPoly a_o;                  // RLWE public 'a' mod gamma' (from pp)
-  std::vector<RNSPoly> v1, v2;  // theta-conversion ciphertexts Enc_s(theta^(j) Q_s), NTT mod gamma'
+  std::vector<RNSPoly> v1, v2;  // KDM-Enc-Pack outputs (7 each), NTT mod gamma (only the gamma_o limbs are used)
   uint8_t K[16];                // PRF key (only needed for correctness)
 };
 struct SecretKey0 {
   std::vector<int64_t> s;
-  std::vector<std::vector<int64_t>> theta;
+  std::vector<std::vector<u64>> delta;    // payloads Delta^(j) in R_alpha (coefficients in [0, alpha))
 };
 struct PublicKey1 {
   std::vector<RNSPoly> v;       // x~_1 : v_t for t in [sqrt n], NTT mod p
@@ -181,10 +179,10 @@ struct SecretKey1 {
 // Evaluation keys (the state each party keeps after KeyDer).
 struct EvalKey0 {
   AES128 prf;
-  RNSPoly s_beta;               // s mod beta (coefficient form, kb limbs, stored in kg-limb buffer)
+  RNSPoly s_beta;               // s mod beta (coefficient form, kb limbs)
   RNSPoly negI1;                // -(u1 * s)  : negated input share of constant 1, NTT mod gamma
   RNSPoly nu1;                  // -u1, NTT mod gamma
-  std::vector<RNSPoly> nv1, nv2;      // negated theta-conversion ciphertexts, NTT mod gamma'
+  std::vector<RNSPoly> nv1, nv2;      // negated KDM-Enc-Pack ciphertexts, NTT mod gamma
   // memory-share source
   std::vector<RNSPoly> z0;      // eager table: z0^(i) in [0, beta'), coefficient form (kbp limbs)
   std::vector<RNSPoly> W;       // lazy: a^j * s NTT mod p, j in [0, sqrt n)
@@ -208,12 +206,13 @@ inline RNSPoly expand_a(const Context& C, const PublicParams& pp, const Base& B,
   return a;
 }
 
-// Party 0: samples s, theta^(1..7); runs Share0(s), SP-RLWE-Gen, KDM-Enc1, KDM-Enc-Pack.
+// PKPCF.KeyGen(0): samples s <- chi_s and Delta^(j) <- R_alpha, then
+// Pack-PK-aHMAC.KeyGen0(s, {Delta}): Share0(s), SP-RLWE-Gen, KDM-Enc1, KDM-Enc-Pack.
 inline void KeyGen0(Context& C, const PublicParams& pp, Rng& rng, SecretKey0& sk, PublicKey0& pk) {
   const size_t N = C.N, sn = C.P.sqrt_n();
   sk.s.resize(N); sample_ternary(sk.s.data(), N, rng);
-  sk.theta.assign(7, std::vector<int64_t>(N));
-  for (auto& th : sk.theta) sample_ternary(th.data(), N, rng);
+  sk.delta.assign(7, std::vector<u64>(N));
+  for (auto& d : sk.delta) sample_uniform_small(d.data(), N, C.P.alpha, rng);
 
   // ---- SuccHCVOLE.Share0(s) over R_p
   pk.a_p = expand_a(C, pp, C.Bp, 0);
@@ -228,7 +227,7 @@ inline void KeyGen0(Context& C, const PublicParams& pp, Rng& rng, SecretKey0& sk
     sample_cbd(e.data(), N, C.P.eta, rng);
     RNSPoly en = C.ntt_of_signed(e.data(), C.Bp);
     poly_add(Aj, Aj, en, C.Bp);                          // + e'_j
-    if (j == sn + 1) {                                    // + floor(p/beta) * s = Q' s
+    if (j == sn + 1) {                                    // + floor(p/beta') * s = Q' s
       RNSPoly t(C.kp, N);
       poly_fma_scalar(t, s_p, C.Qp_mod_p, nullptr, C.Bp);
       poly_add(Aj, Aj, t, C.Bp);
@@ -260,32 +259,28 @@ inline void KeyGen0(Context& C, const PublicParams& pp, Rng& rng, SecretKey0& sk
     sample_cbd(e.data(), N, C.P.eta, rng); { RNSPoly t = C.ntt_of_signed(e.data(), C.Bg); poly_add(pk.u3, pk.u3, t, C.Bg); }
     RNSPoly t(C.kg, N); poly_fma_scalar(t, s_g, C.Q_mod_g, nullptr, C.Bg); poly_add(pk.u3, pk.u3, t, C.Bg);  // + s * floor(gamma/beta)
   }
-  // ---- theta-conversion ciphertexts over R_gamma': (v1, v2) = (r a + e1, r b + e2 + theta^(j) Q_s), b = a s + e_b
-  pk.a_o = expand_a(C, pp, C.Bo, 2);
+  // ---- KDM-Enc-Pack(a, b1, {Delta^(j)}):  theta^(j) <- chi_s,
+  //      v1 = theta a + e1,  v2 = theta b1 + e2 + Delta^(j) * floor(gamma_o/alpha)   (mod gamma)
   {
-    RNSPoly s_o = C.ntt_of_signed(sk.s.data(), C.Bo);
-    RNSPoly b_o(C.ko, N);
-    poly_mul(b_o, pk.a_o, s_o, C.Bo);
-    sample_cbd(e.data(), N, C.P.eta, rng); { RNSPoly t = C.ntt_of_signed(e.data(), C.Bo); poly_add(b_o, b_o, t, C.Bo); }
     pk.v1.resize(7); pk.v2.resize(7);
-    std::vector<int64_t> rr(N);
+    std::vector<int64_t> th(N);
     for (size_t j = 0; j < 7; j++) {
-      sample_ternary(rr.data(), N, rng);
-      RNSPoly r = C.ntt_of_signed(rr.data(), C.Bo);
-      pk.v1[j] = RNSPoly(C.ko, N); pk.v2[j] = RNSPoly(C.ko, N);
-      poly_mul(pk.v1[j], r, pk.a_o, C.Bo);
-      sample_cbd(e.data(), N, C.P.eta, rng); { RNSPoly t = C.ntt_of_signed(e.data(), C.Bo); poly_add(pk.v1[j], pk.v1[j], t, C.Bo); }
-      poly_mul(pk.v2[j], r, b_o, C.Bo);
-      sample_cbd(e.data(), N, C.P.eta, rng); { RNSPoly t = C.ntt_of_signed(e.data(), C.Bo); poly_add(pk.v2[j], pk.v2[j], t, C.Bo); }
-      RNSPoly th = C.ntt_of_signed(sk.theta[j].data(), C.Bo);
-      RNSPoly t(C.ko, N); poly_fma_scalar(t, th, C.Qs_mod_o, nullptr, C.Bo);   // theta^(j) * Q_s
-      poly_add(pk.v2[j], pk.v2[j], t, C.Bo);
+      sample_ternary(th.data(), N, rng);
+      RNSPoly theta = C.ntt_of_signed(th.data(), C.Bg);
+      pk.v1[j] = RNSPoly(C.kg, N); pk.v2[j] = RNSPoly(C.kg, N);
+      poly_mul(pk.v1[j], theta, pk.a_g, C.Bg);
+      sample_cbd(e.data(), N, C.P.eta, rng); { RNSPoly t = C.ntt_of_signed(e.data(), C.Bg); poly_add(pk.v1[j], pk.v1[j], t, C.Bg); }
+      poly_mul(pk.v2[j], theta, b1, C.Bg);
+      sample_cbd(e.data(), N, C.P.eta, rng); { RNSPoly t = C.ntt_of_signed(e.data(), C.Bg); poly_add(pk.v2[j], pk.v2[j], t, C.Bg); }
+      RNSPoly dn = C.ntt_of_small(sk.delta[j].data(), C.Bg);
+      RNSPoly t(C.kg, N); poly_fma_scalar(t, dn, C.payload_mod_g, nullptr, C.Bg);
+      poly_add(pk.v2[j], pk.v2[j], t, C.Bg);
     }
   }
   rng.fill(pk.K, 16);
 }
 
-// Party 1: samples d wPRF keys (bit-packed), computes K~^(i) = psi(bits), runs Share1.
+// PKPCF.KeyGen(1): samples d wPRF keys (bit-packed), computes K~^(i) = psi(bits), runs Share1.
 inline void KeyGen1(Context& C, const PublicParams& pp, Rng& rng, SecretKey1& sk, PublicKey1& pk) {
   const size_t N = C.N, n = C.P.n, sn = C.P.sqrt_n(), W = N / 64;
   sk.bits.resize(n * W);
@@ -316,11 +311,11 @@ inline void KeyGen1(Context& C, const PublicParams& pp, Rng& rng, SecretKey1& sk
 }
 
 // =============================================================== KeyDer
-inline void negate_theta_cts(Context& C, const PublicKey0& pk0, std::vector<RNSPoly>& nv1, std::vector<RNSPoly>& nv2) {
+inline void negate_pack_cts(Context& C, const PublicKey0& pk0, std::vector<RNSPoly>& nv1, std::vector<RNSPoly>& nv2) {
   nv1.resize(7); nv2.resize(7);
   for (size_t j = 0; j < 7; j++) {
-    nv1[j] = RNSPoly(C.ko, C.N); poly_neg(nv1[j], pk0.v1[j], C.Bo);
-    nv2[j] = RNSPoly(C.ko, C.N); poly_neg(nv2[j], pk0.v2[j], C.Bo);
+    nv1[j] = RNSPoly(C.kg, C.N); poly_neg(nv1[j], pk0.v1[j], C.Bg);
+    nv2[j] = RNSPoly(C.kg, C.N); poly_neg(nv2[j], pk0.v2[j], C.Bg);
   }
 }
 
@@ -331,7 +326,7 @@ inline void KeyDer0(Context& C, const SecretKey0& sk, const PublicKey0& pk0, con
   RNSPoly s_g = C.ntt_of_signed(sk.s.data(), C.Bg);
   ek.nu1 = RNSPoly(C.kg, N); poly_neg(ek.nu1, pk0.u1, C.Bg);
   ek.negI1 = RNSPoly(C.kg, N); poly_mul(ek.negI1, ek.nu1, s_g, C.Bg);
-  negate_theta_cts(C, pk0, ek.nv1, ek.nv2);
+  negate_pack_cts(C, pk0, ek.nv1, ek.nv2);
   // W_j = a^j s (NTT mod p), j in [0, sn)
   RNSPoly s_p = C.ntt_of_signed(sk.s.data(), C.Bp);
   ek.W.resize(sn);
@@ -361,7 +356,7 @@ inline void KeyDer1(Context& C, const SecretKey1& sk, const PublicKey1& /*pk1*/,
   ek.nu1 = RNSPoly(C.kg, N); poly_neg(ek.nu1, pk0.u1, C.Bg);
   ek.nu2 = RNSPoly(C.kg, N); poly_neg(ek.nu2, pk0.u2, C.Bg);
   ek.nu3 = RNSPoly(C.kg, N); poly_neg(ek.nu3, pk0.u3, C.Bg);
-  negate_theta_cts(C, pk0, ek.nv1, ek.nv2);
+  negate_pack_cts(C, pk0, ek.nv1, ek.nv2);
   // eager memory shares z1^(i) = round(-(u~ + <(u0,u1,x_t),(A_{sn-r},...,A_{2sn-r+1})>) / Q')
   ek.z1.resize(n);
   std::vector<RNSPoly> X(sn);
@@ -438,28 +433,28 @@ inline u64 const_mod(int64_t c, u64 q, bool half) {
 // ---------------------------------------------------------------- Party 0
 struct Evaluator0 {
   Context& C; EvalKey0& ek;
-  size_t N, kb, kg;
+  size_t N, kb, kg, ka;
   Timer T;
   RNSPoly t13;
   std::vector<RNSPoly> mem;          // memory shares: z (kb valid limbs inside kg-limb buffers)
   RNSPoly IX, IM;                    // negated input shares of S_X, S_M (NTT gamma)
-  AlignedBuf slots, ys;
-  RNSPoly to, uo;                    // gamma'-base scratch
+  AlignedBuf ys;
+  RNSPoly to, uo;                    // output-stage scratch
   RNSPoly zX, zM, zi;
   std::vector<u64> dbg_ys[2], dbg_y[2];   // copies of the output slot values (tests only)
   bool keep_debug = true;
-  Evaluator0(Context& c, EvalKey0& e) : C(c), ek(e), N(c.N), kb(c.kb), kg(c.kg), t13(c.kg, c.N), IX(c.kg, c.N), IM(c.kg, c.N),
-      to(c.ko, c.N), uo(c.ko, c.N), zX(c.kbp + 1, c.N), zM(c.kbp + 1, c.N), zi(c.kbp + 1, c.N) {
+  Evaluator0(Context& c, EvalKey0& e) : C(c), ek(e), N(c.N), kb(c.kb), kg(c.kg), ka(c.ka), t13(c.kg, c.N), IX(c.kg, c.N), IM(c.kg, c.N),
+      to(c.kg, c.N), uo(c.kg, c.N), zX(c.kg, c.N), zM(c.kg, c.N), zi(c.kg, c.N) {
     mem.resize(CELL_COUNT); for (auto& m : mem) m = RNSPoly(kg, N);
-    slots.alloc(N); ys.alloc(8 * N);
+    ys.alloc(8 * N);
   }
-  // memory share z0^(i) (integer in [0,beta')) lifted exactly to kbp+1 limbs of dst
+  // memory share z0^(i) (integer in [0,beta')) lifted exactly to limbs [0, kbp] of dst
   void memshare(size_t i, RNSPoly& dst) {
-    if (C.P.eager0) { C.lift_s.apply(ek.z0[i], dst, C.kbp + 1); return; }
+    if (C.P.eager0) { C.lift_s.apply(ek.z0[i], dst); return; }
     size_t sn = C.P.sqrt_n(), tt = i / sn, r = i % sn + 1;
     RNSPoly t(C.kp, N);
     poly_mul(t, ek.v[tt], ek.W[sn - r], C.Bp); poly_intt(t, C.Bp); poly_neg(t, t, C.Bp); C.resc_p.apply(t);
-    C.lift_s.apply(t, dst, C.kbp + 1);
+    C.lift_s.apply(t, dst);
   }
   // From the exact (kbp+1)-limb memory share z of S: z5 = z over the kb beta-limbs
   // (memory form) and out = -(u1 * z) (negated input share, NTT mod gamma).
@@ -469,7 +464,7 @@ struct Evaluator0 {
     poly_ntt(t13, C.Bg);
     poly_mul(out, ek.nu1, t13, C.Bg);
   }
-  // Mul(I_f, M_g):  z_out = round((-I * z_in + r) / Q)
+  // Mul(I_f, M_g):  z_out = round((-I * z_in + r) / (gamma/beta))
   void mul(int id, const RNSPoly& negI, const RNSPoly& min, RNSPoly& mout) {
     T.start();
     memcpy(t13.buf.p, min.buf.p, 8 * kb * N);
@@ -528,27 +523,26 @@ struct Evaluator0 {
     lincomb(mem[CELL_P], {{CELL_A, 1}, {CELL_D, 1}}, 0, true);
     lincomb(mem[CELL_PB], {{CELL_A, 1}, {CELL_D, -1}}, 0, true);
     T.stop("lincomb");
-    // outputs
+    // Output(M_f, alpha):  (M_f1 mod alpha,  Y^(j) = floor(-M_f1 * v1^(j))_{gamma_o/alpha})
     out.r0.resize(16 * N); out.r1.resize(16 * N);
     SlotHash H(x);
     for (int b = 0; b < 2; b++) {
       T.start();
       RNSPoly& M = mem[b == 0 ? CELL_P : CELL_PB];
-      C.lift_o.apply_to(M, to, C.Bo);                 // M over [alpha | Q_s]
-      C.to_slots(slots.p, to.limb(0));                // psi^{-1}(M mod alpha): main output
+      C.lift_o.apply(M, to);                          // M over {alpha} u beta u Q_s limbs
+      poly_ntt_idx(to, C.Bg, C.idx_o);
+      const u64* slots = to.limb(ka);                 // NTT_alpha(M mod alpha) = psi^{-1}(M mod alpha): main output
       T.stop("output-lift");
-      poly_ntt(to, C.Bo);
-      for (size_t j = 0; j < 7; j++) {                // theta outputs: shares of theta^(j) * P mod alpha
-        poly_mul(uo, to, ek.nv1[j], C.Bo);            // -M_01 * v1^(j)
-        poly_intt(uo, C.Bo);
-        C.add_prf(uo, ek.prf, 100 + 8 * b + j, C.Bo, 1);
-        C.resc_o.apply(uo);                           // round(. / Q_s) mod alpha
-        C.to_slots(ys.p + j * N, uo.limb(0));
+      for (size_t j = 0; j < 7; j++) {
+        poly_mul_idx(uo, to, ek.nv1[j], C.Bg, C.idx_o);   // -M_01 * v1^(j)  (mod gamma_o)
+        poly_intt_idx(uo, C.Bg, C.idx_o);
+        C.resc_o.apply(uo);                               // round(. / (gamma_o/alpha)) -> alpha limb
+        C.to_slots(ys.p + j * N, uo.limb(ka));
       }
-      T.stop("output-theta");
-      if (keep_debug) { dbg_ys[b].assign(ys.p, ys.p + 7 * N); dbg_y[b].assign(slots.p, slots.p + N); }
+      T.stop("output-round");
+      if (keep_debug) { dbg_ys[b].assign(ys.p, ys.p + 7 * N); dbg_y[b].assign(slots, slots + N); }
       std::vector<uint8_t>& R = b ? out.r1 : out.r0;
-      const u64* yarr[8] = {slots.p, ys.p, ys.p + N, ys.p + 2 * N, ys.p + 3 * N, ys.p + 4 * N, ys.p + 5 * N, ys.p + 6 * N};
+      const u64* yarr[8] = {slots, ys.p, ys.p + N, ys.p + 2 * N, ys.p + 3 * N, ys.p + 4 * N, ys.p + 5 * N, ys.p + 6 * N};
       H.hash_all(yarr, N, R.data());
       T.stop("hash");
     }
@@ -558,28 +552,28 @@ struct Evaluator0 {
 // ---------------------------------------------------------------- Party 1
 struct Evaluator1 {
   Context& C; EvalKey1& ek;
-  size_t N, kb, kg;
+  size_t N, kb, kg, ka;
   Timer T;
-  struct Mem { RNSPoly z; RNSPoly g; AlignedBuf gs; };   // z: kb valid limbs in kg buffer; g: value NTT mod gamma; gs: value slots mod alpha
-  struct Fac { RNSPoly nI0, nI1, f; AlignedBuf fs; };    // negated input shares, value (NTT gamma), value slots
+  struct Mem { RNSPoly z; RNSPoly g; };   // z: kb valid limbs in kg buffer; g: cleartext value, NTT mod gamma (alpha limb = slots)
+  struct Fac { RNSPoly nI0, nI1, f; };    // negated input shares, value (NTT gamma)
   RNSPoly t13, tmp13;
   std::vector<Mem> mem;
   Fac FX, FM;
-  AlignedBuf slots, ys, sX, sM;
+  AlignedBuf ys;
   std::vector<u64> coeffs, acc, sl;
-  RNSPoly to, uo, go, wo;
+  RNSPoly to, uo, wo;
   RNSPoly zX, zM, zi, YX, YM, ZX, ZM;
   std::vector<u64> dbg_ys[2], dbg_y[2];
   bool keep_debug = true;
-  Evaluator1(Context& c, EvalKey1& e) : C(c), ek(e), N(c.N), kb(c.kb), kg(c.kg), t13(c.kg, c.N), tmp13(c.kg, c.N),
-      to(c.ko, c.N), uo(c.ko, c.N), go(c.ko, c.N), wo(c.ko, c.N),
-      zX(c.kbp + 1, c.N), zM(c.kbp + 1, c.N), zi(c.kbp + 1, c.N), YX(c.kg, c.N), YM(c.kg, c.N), ZX(c.kg, c.N), ZM(c.kg, c.N) {
-    mem.resize(CELL_COUNT); for (auto& m : mem) { m.z = RNSPoly(kg, N); m.g = RNSPoly(kg, N); m.gs.alloc(N); }
-    for (Fac* f : {&FX, &FM}) { f->nI0 = RNSPoly(kg, N); f->nI1 = RNSPoly(kg, N); f->f = RNSPoly(kg, N); f->fs.alloc(N); }
-    slots.alloc(N); ys.alloc(8 * N); sX.alloc(N); sM.alloc(N); coeffs.resize(N); acc.resize(N); sl.resize(N);
+  Evaluator1(Context& c, EvalKey1& e) : C(c), ek(e), N(c.N), kb(c.kb), kg(c.kg), ka(c.ka), t13(c.kg, c.N), tmp13(c.kg, c.N),
+      to(c.kg, c.N), uo(c.kg, c.N), wo(c.kg, c.N),
+      zX(c.kg, c.N), zM(c.kg, c.N), zi(c.kg, c.N), YX(c.kg, c.N), YM(c.kg, c.N), ZX(c.kg, c.N), ZM(c.kg, c.N) {
+    mem.resize(CELL_COUNT); for (auto& m : mem) { m.z = RNSPoly(kg, N); m.g = RNSPoly(kg, N); }
+    for (Fac* f : {&FX, &FM}) { f->nI0 = RNSPoly(kg, N); f->nI1 = RNSPoly(kg, N); f->f = RNSPoly(kg, N); }
+    ys.alloc(8 * N); coeffs.resize(N); acc.resize(N); sl.resize(N);
   }
   inline u64 bit(size_t i, size_t l) const { return (ek.bits[i * (N / 64) + l / 64] >> (l % 64)) & 1; }
-  // Mul(I_f, M_g):  z_out = round((-z_in*I0 - g*I1 + r)/Q),  g_out = f*g
+  // Mul(I_f, M_g):  z_out = round((-z_in*I0 - g*I1 + r)/(gamma/beta)),  g_out = f*g
   void mul(int id, const Fac& f, const Mem& min, Mem& mout) {
     T.start();
     memcpy(t13.buf.p, min.z.buf.p, 8 * kb * N);
@@ -589,56 +583,45 @@ struct Evaluator1 {
     poly_mul(tmp13, min.g, f.nI1, C.Bg);          // -g * I1
     poly_add(t13, t13, tmp13, C.Bg);
     poly_mul(mout.g, f.f, min.g, C.Bg);           // value update g' = f g
-    for (size_t i = 0; i < N; i++) mout.gs.p[i] = C.fma(f.fs.p[i] * min.gs.p[i]);
     T.stop("pointwise");
     poly_intt(t13, C.Bg);                         T.stop("ntt");
     C.add_prf(t13, ek.prf, id);                   T.stop("prf");
     C.resc_g.apply(t13);                          T.stop("rescale");
     memcpy(mout.z.buf.p, t13.buf.p, 8 * kb * N);
   }
-  // out = sum c_k mem[cell_k] + c_const (times 2^{-1} if half): shares z (mod beta), values g (NTT gamma), slots gs (mod alpha)
-  // g_only_out: the value g is only needed on the Q_s limbs [kb, kb+k_Qs) (output-stage cells)
+  // out = sum c_k mem[cell_k] + c_const (times 2^{-1} if half): shares z (mod beta) and values g (NTT gamma).
+  // g_only_out: the value is only needed on the output limbs (idx_o).
   void lincomb(Mem& out, const std::vector<LinTerm>& terms, int64_t c_const, bool half, bool g_only_out = false) {
+    std::vector<char> need(kg, !g_only_out);
+    if (g_only_out) for (size_t i : C.idx_o) need[i] = 1;
     for (size_t l = 0; l < kg; l++) {
       u64 q = C.Bg.q[l];
       bool first = true;
-      bool need_g = !g_only_out || (l >= kb && l < kb + C.P.k_Qs);
       for (auto& t : terms) {
         if (t.c == 0) continue;
         u64 cq = const_mod(t.c, q, half);
         if (l < kb) hx::EltwiseFMAMod(out.z.limb(l), mem[t.cell].z.limb(l), cq, first ? nullptr : out.z.limb(l), N, q, 1);
-        if (need_g) hx::EltwiseFMAMod(out.g.limb(l), mem[t.cell].g.limb(l), cq, first ? nullptr : out.g.limb(l), N, q, 1);
+        if (need[l]) hx::EltwiseFMAMod(out.g.limb(l), mem[t.cell].g.limb(l), cq, first ? nullptr : out.g.limb(l), N, q, 1);
         first = false;
       }
-      if (!need_g) continue;
-      if (c_const) hx::EltwiseAddMod(out.g.limb(l), out.g.limb(l), const_mod(c_const, q, half), N, q);   // constant: z-share is 0
-    }
-    u64 al = C.P.alpha;
-    std::vector<u64> cs; for (auto& t : terms) cs.push_back(const_mod(t.c, al, half));
-    u64 cc = const_mod(c_const, al, half);
-    for (size_t i = 0; i < N; i++) {
-      u64 v = cc;
-      for (size_t k = 0; k < terms.size(); k++) v += C.fma(cs[k] * mem[terms[k].cell].gs.p[i]);
-      out.gs.p[i] = C.fma(v);
+      if (c_const && need[l]) hx::EltwiseAddMod(out.g.limb(l), out.g.limb(l), const_mod(c_const, q, half), N, q);   // constant: z-share is 0
     }
   }
   void eval(const uint8_t x[16], Output1& out) {
     T.start();
     size_t idx[12]; derive_indices(x, C.P.n, idx);
-    const u64 al = C.P.alpha;
-    // wPRF bits b_i and slot sums
+    // wPRF bits b_i, evaluated directly on the packed key bits
     out.b.assign(N, 0);
     for (size_t l = 0; l < N; l++) {
-      u64 xr = 0, mj = 0, sx = 0, sm = 0;
-      for (int i = 0; i < 5; i++) { u64 v = bit(idx[i], l); xr ^= v; sx += v; }
-      for (int i = 5; i < 12; i++) { u64 v = bit(idx[i], l); mj += v; sm += v; }
+      u64 xr = 0, mj = 0;
+      for (int i = 0; i < 5; i++) xr ^= bit(idx[i], l);
+      for (int i = 5; i < 12; i++) mj += bit(idx[i], l);
       out.b[l] = (uint8_t)(xr ^ (mj >= 4));
-      sX.p[l] = sx; sM.p[l] = sm;
     }
     // memory shares z of S_X, S_M (exact integer sums, kbp+1 limbs)
     zX.zero(); zM.zero();
     for (int i = 0; i < 12; i++) {
-      C.lift_s.apply(ek.z1[idx[i]], zi, C.kbp + 1);
+      C.lift_s.apply(ek.z1[idx[i]], zi);
       RNSPoly& z = (i < 5) ? zX : zM;
       for (size_t l = 0; l <= C.kbp; l++) hx::EltwiseAddMod(z.limb(l), z.limb(l), zi.limb(l), N, C.Bg.q[l]);
     }
@@ -658,20 +641,16 @@ struct Evaluator1 {
     // Z = lift(z) NTT ; memory form of S_M (and S_X, unused) over beta
     C.lift_m.apply(zX, ZX); memcpy(mem[CELL_SX].z.buf.p, ZX.buf.p, 8 * kb * N); poly_ntt(ZX, C.Bg);
     C.lift_m.apply(zM, ZM); memcpy(mem[CELL_T1].z.buf.p, ZM.buf.p, 8 * kb * N); poly_ntt(ZM, C.Bg);
-    // input shares: -I0(S) = nu2*Y + nu1*Z ; -I1(S) = nu3*Y + nu2*Z ; value f = Y ; slots
-    auto make_fac = [&](Fac& F, const RNSPoly& Y, const RNSPoly& Z, const u64* ssum) {
+    // input shares: -I0(S) = nu2*Y + nu1*Z ; -I1(S) = nu3*Y + nu2*Z ; value f = Y
+    auto make_fac = [&](Fac& F, const RNSPoly& Y, const RNSPoly& Z) {
       poly_mul(F.nI0, ek.nu2, Y, C.Bg); poly_mul_acc(F.nI0, ek.nu1, Z, tmp13, C.Bg);
       poly_mul(F.nI1, ek.nu3, Y, C.Bg); poly_mul_acc(F.nI1, ek.nu2, Z, tmp13, C.Bg);
       memcpy(F.f.buf.p, Y.buf.p, 8 * kg * N);
-      memcpy(F.fs.p, ssum, 8 * N);
     };
-    make_fac(FX, YX, ZX, sX.p);
-    make_fac(FM, YM, ZM, sM.p);
-    // initial memory of S_M: value
+    make_fac(FX, YX, ZX);
+    make_fac(FM, YM, ZM);
     memcpy(mem[CELL_T1].g.buf.p, YM.buf.p, 8 * kg * N);
-    memcpy(mem[CELL_T1].gs.p, sM.p, 8 * N);
     memcpy(mem[CELL_SX].g.buf.p, YX.buf.p, 8 * kg * N);
-    memcpy(mem[CELL_SX].gs.p, sX.p, 8 * N);
     T.stop("inputshares");
     // RMS program
     mul(0, FM, mem[CELL_T1], mem[CELL_T2]);
@@ -693,31 +672,27 @@ struct Evaluator1 {
     lincomb(mem[CELL_P], {{CELL_A, 1}, {CELL_D, 1}}, 0, true, true);
     lincomb(mem[CELL_PB], {{CELL_A, 1}, {CELL_D, -1}}, 0, true, true);
     T.stop("lincomb");
-    // outputs: only the branch b_i matters in slot i, but both are computed (packing).
+    // Output(M_y, alpha):  (M_y1 mod alpha,  Y^(j) = floor(M_y0 v2^(j) - M_y1 v1^(j))_{gamma_o/alpha}),  M_y0 = -g
     out.r.resize(16 * N);
     SlotHash H(x);
     for (int b = 0; b < 2; b++) {
       T.start();
       Mem& M = mem[b == 0 ? CELL_P : CELL_PB];
-      C.lift_o.apply_to(M.z, to, C.Bo);               // M_11 over [alpha | Q_s]
-      C.to_slots(slots.p, to.limb(0));                // main output slots
+      C.lift_o.apply(M.z, to);
+      poly_ntt_idx(to, C.Bg, C.idx_o);
+      const u64* slots = to.limb(ka);                 // main output slots
       T.stop("output-lift");
-      poly_ntt(to, C.Bo);
-      // value g over gamma': limb 0 = slots (NTT mod alpha), limbs 1.. = g's Q-limbs
-      memcpy(go.limb(0), M.gs.p, 8 * N);
-      for (size_t l = 1; l < C.ko; l++) memcpy(go.limb(l), M.g.limb(kb + l - 1), 8 * N);
       for (size_t j = 0; j < 7; j++) {
-        poly_mul(uo, to, ek.nv1[j], C.Bo);            // -M_11 * v1^(j)
-        poly_mul(wo, go, ek.nv2[j], C.Bo);            // -g * v2^(j)
-        poly_add(uo, uo, wo, C.Bo);
-        poly_intt(uo, C.Bo);
-        C.add_prf(uo, ek.prf, 100 + 8 * b + j, C.Bo, 1);
+        poly_mul_idx(uo, to, ek.nv1[j], C.Bg, C.idx_o);   // -M_11 * v1^(j)
+        poly_mul_idx(wo, M.g, ek.nv2[j], C.Bg, C.idx_o);  // -g * v2^(j)  (= M_10 v2)
+        for (size_t i : C.idx_o) hx::EltwiseAddMod(uo.limb(i), uo.limb(i), wo.limb(i), N, C.Bg.q[i]);
+        poly_intt_idx(uo, C.Bg, C.idx_o);
         C.resc_o.apply(uo);
-        C.to_slots(ys.p + j * N, uo.limb(0));
+        C.to_slots(ys.p + j * N, uo.limb(ka));
       }
-      T.stop("output-theta");
-      if (keep_debug) { dbg_ys[b].assign(ys.p, ys.p + 7 * N); dbg_y[b].assign(slots.p, slots.p + N); }
-      const u64* yarr[8] = {slots.p, ys.p, ys.p + N, ys.p + 2 * N, ys.p + 3 * N, ys.p + 4 * N, ys.p + 5 * N, ys.p + 6 * N};
+      T.stop("output-round");
+      if (keep_debug) { dbg_ys[b].assign(ys.p, ys.p + 7 * N); dbg_y[b].assign(slots, slots + N); }
+      const u64* yarr[8] = {slots, ys.p, ys.p + N, ys.p + 2 * N, ys.p + 3 * N, ys.p + 4 * N, ys.p + 5 * N, ys.p + 6 * N};
       H.hash_all(yarr, N, out.r.data(), out.b.data(), (uint8_t)b);
       T.stop("hash");
     }
