@@ -1,7 +1,8 @@
 // Packed public-key PCF for OT (Construction 5), instantiated with
 //   * Construction 2 (succinct half-chosen VOLE with local reconstruction),
 //   * Construction 4 (compact lattice-based packed public-key aHMAC:
-//     SP-RLWE public samples, KDM-Enc1, KDM-Enc-Pack, InpMemMult, rounded Output),
+//     SP-RLWE public samples, KDM-Enc1, KDM-Enc-Pack encryptions of the payloads Delta^(j),
+//     InpMemMult, rounded Output),
 //   * the XOR5-MAJ7 GAR-wPRF written as an RMS program (Section 8).
 //
 // Moduli (all limbs except alpha are NTT-friendly primes of `prime_bits` bits,
@@ -81,7 +82,7 @@ struct Context {
   Lifter lift_o;           // beta limbs -> {alpha} u Q_s limbs (Output stage)
   std::vector<u64> Q_mod_g;              // floor(gamma/beta) = alpha Q~ mod q_i
   std::vector<u64> Qp_mod_p;             // Q' mod q_i over Bp
-  std::vector<u64> payload_mod_g;        // floor(gamma_o/alpha) = beta Q_s mod q_i   (KDM-Enc-Pack payload scale)
+  std::vector<u64> delta_scale_mod_g;    // floor(gamma_o/alpha) = beta Q_s mod q_i: scale of the payload Delta^(j) in KDM-Enc-Pack
   AlignedBuf scratch;
   FastMod fma;                           // fast reduction mod alpha
 
@@ -120,7 +121,7 @@ struct Context {
     BigUInt pay(1); for (u64 q : beta) pay.mul_small(q); for (size_t i : idx_Qs) pay.mul_small(Bg.q[i]);   // gamma_o / alpha
     Q_mod_g.resize(kg); for (size_t i = 0; i < kg; i++) Q_mod_g[i] = Qg.mod_small(Bg.q[i]);
     Qp_mod_p.resize(kp); for (size_t i = 0; i < kp; i++) Qp_mod_p[i] = Qp.mod_small(Bp.q[i]);
-    payload_mod_g.resize(kg); for (size_t i = 0; i < kg; i++) payload_mod_g[i] = pay.mod_small(Bg.q[i]);
+    delta_scale_mod_g.resize(kg); for (size_t i = 0; i < kg; i++) delta_scale_mod_g[i] = pay.mod_small(Bg.q[i]);
     scratch.alloc(N);
     BigUInt betaB(1); for (u64 q : beta) betaB.mul_small(q);
     BigUInt betapB(1); for (size_t i = 0; i < kbp; i++) betapB.mul_small(beta[i]);
@@ -161,12 +162,12 @@ struct PublicKey0 {
   RNSPoly a_p;                  // a in NTT form mod p (from pp)
   std::vector<RNSPoly> A;       // s~_1 : A_j, j in [0, 2 sqrt(n)], NTT mod p
   RNSPoly a_g, u1, u2, u3;      // SP-RLWE public 'a' and KDM-Enc1 outputs, NTT mod gamma
-  std::vector<RNSPoly> v1, v2;  // KDM-Enc-Pack outputs (7 each), NTT mod gamma (only the gamma_o limbs are used)
+  std::vector<RNSPoly> v1, v2;  // KDM-Enc-Pack: encryptions (v1^(j), v2^(j)) of Delta^(j)*floor(gamma_o/alpha) under s, NTT mod gamma (only the gamma_o limbs are used)
   uint8_t K[16];                // PRF key (only needed for correctness)
 };
 struct SecretKey0 {
   std::vector<int64_t> s;
-  std::vector<std::vector<u64>> delta;    // payloads Delta^(j) in R_alpha (coefficients in [0, alpha))
+  std::vector<std::vector<u64>> delta;    // output secrets / payloads Delta^(j) in R_alpha (coefficients in [0, alpha))
 };
 struct PublicKey1 {
   std::vector<RNSPoly> v;       // x~_1 : v_t for t in [sqrt n], NTT mod p
@@ -182,7 +183,7 @@ struct EvalKey0 {
   RNSPoly s_beta;               // s mod beta (coefficient form, kb limbs)
   RNSPoly negI1;                // -(u1 * s)  : negated input share of constant 1, NTT mod gamma
   RNSPoly nu1;                  // -u1, NTT mod gamma
-  std::vector<RNSPoly> nv1, nv2;      // negated KDM-Enc-Pack ciphertexts, NTT mod gamma
+  std::vector<RNSPoly> nv1, nv2;      // negated Delta-ciphertexts (-v1^(j), -v2^(j)) of KDM-Enc-Pack, NTT mod gamma
   // memory-share source
   std::vector<RNSPoly> z0;      // eager table: z0^(i) in [0, beta'), coefficient form (kbp limbs)
   std::vector<RNSPoly> W;       // lazy: a^j * s NTT mod p, j in [0, sqrt n)
@@ -192,7 +193,7 @@ struct EvalKey1 {
   AES128 prf;
   std::vector<u64> bits;
   RNSPoly nu1, nu2, nu3;        // negated u's, NTT mod gamma
-  std::vector<RNSPoly> nv1, nv2;
+  std::vector<RNSPoly> nv1, nv2;      // negated Delta-ciphertexts (-v1^(j), -v2^(j)) of KDM-Enc-Pack, NTT mod gamma
   std::vector<RNSPoly> z1;      // eager table: z1^(i) in [0, beta'), coefficient form (kbp limbs)
 };
 
@@ -259,8 +260,8 @@ inline void KeyGen0(Context& C, const PublicParams& pp, Rng& rng, SecretKey0& sk
     sample_cbd(e.data(), N, C.P.eta, rng); { RNSPoly t = C.ntt_of_signed(e.data(), C.Bg); poly_add(pk.u3, pk.u3, t, C.Bg); }
     RNSPoly t(C.kg, N); poly_fma_scalar(t, s_g, C.Q_mod_g, nullptr, C.Bg); poly_add(pk.u3, pk.u3, t, C.Bg);  // + s * floor(gamma/beta)
   }
-  // ---- KDM-Enc-Pack(a, b1, {Delta^(j)}):  theta^(j) <- chi_s,
-  //      v1 = theta a + e1,  v2 = theta b1 + e2 + Delta^(j) * floor(gamma_o/alpha)   (mod gamma)
+  // ---- KDM-Enc-Pack(a, b1, {Delta^(j)}): encrypt the payload Delta^(j) under s with fresh
+  //      randomness theta^(j) <- chi_s:  v1 = theta a + e1,  v2 = theta b1 + e2 + Delta^(j) * floor(gamma_o/alpha)  (mod gamma)
   {
     pk.v1.resize(7); pk.v2.resize(7);
     std::vector<int64_t> th(N);
@@ -273,7 +274,7 @@ inline void KeyGen0(Context& C, const PublicParams& pp, Rng& rng, SecretKey0& sk
       poly_mul(pk.v2[j], theta, b1, C.Bg);
       sample_cbd(e.data(), N, C.P.eta, rng); { RNSPoly t = C.ntt_of_signed(e.data(), C.Bg); poly_add(pk.v2[j], pk.v2[j], t, C.Bg); }
       RNSPoly dn = C.ntt_of_small(sk.delta[j].data(), C.Bg);
-      RNSPoly t(C.kg, N); poly_fma_scalar(t, dn, C.payload_mod_g, nullptr, C.Bg);
+      RNSPoly t(C.kg, N); poly_fma_scalar(t, dn, C.delta_scale_mod_g, nullptr, C.Bg);   // Delta^(j) * floor(gamma_o/alpha)
       poly_add(pk.v2[j], pk.v2[j], t, C.Bg);
     }
   }
@@ -311,7 +312,8 @@ inline void KeyGen1(Context& C, const PublicParams& pp, Rng& rng, SecretKey1& sk
 }
 
 // =============================================================== KeyDer
-inline void negate_pack_cts(Context& C, const PublicKey0& pk0, std::vector<RNSPoly>& nv1, std::vector<RNSPoly>& nv2) {
+// Negated copies of the Delta-ciphertexts (v1^(j), v2^(j)) of KDM-Enc-Pack, used by the Output step.
+inline void negate_delta_cts(Context& C, const PublicKey0& pk0, std::vector<RNSPoly>& nv1, std::vector<RNSPoly>& nv2) {
   nv1.resize(7); nv2.resize(7);
   for (size_t j = 0; j < 7; j++) {
     nv1[j] = RNSPoly(C.kg, C.N); poly_neg(nv1[j], pk0.v1[j], C.Bg);
@@ -326,7 +328,7 @@ inline void KeyDer0(Context& C, const SecretKey0& sk, const PublicKey0& pk0, con
   RNSPoly s_g = C.ntt_of_signed(sk.s.data(), C.Bg);
   ek.nu1 = RNSPoly(C.kg, N); poly_neg(ek.nu1, pk0.u1, C.Bg);
   ek.negI1 = RNSPoly(C.kg, N); poly_mul(ek.negI1, ek.nu1, s_g, C.Bg);
-  negate_pack_cts(C, pk0, ek.nv1, ek.nv2);
+  negate_delta_cts(C, pk0, ek.nv1, ek.nv2);
   // W_j = a^j s (NTT mod p), j in [0, sn)
   RNSPoly s_p = C.ntt_of_signed(sk.s.data(), C.Bp);
   ek.W.resize(sn);
@@ -356,7 +358,7 @@ inline void KeyDer1(Context& C, const SecretKey1& sk, const PublicKey1& /*pk1*/,
   ek.nu1 = RNSPoly(C.kg, N); poly_neg(ek.nu1, pk0.u1, C.Bg);
   ek.nu2 = RNSPoly(C.kg, N); poly_neg(ek.nu2, pk0.u2, C.Bg);
   ek.nu3 = RNSPoly(C.kg, N); poly_neg(ek.nu3, pk0.u3, C.Bg);
-  negate_pack_cts(C, pk0, ek.nv1, ek.nv2);
+  negate_delta_cts(C, pk0, ek.nv1, ek.nv2);
   // eager memory shares z1^(i) = round(-(u~ + <(u0,u1,x_t),(A_{sn-r},...,A_{2sn-r+1})>) / Q')
   ek.z1.resize(n);
   std::vector<RNSPoly> X(sn);
@@ -523,7 +525,7 @@ struct Evaluator0 {
     lincomb(mem[CELL_P], {{CELL_A, 1}, {CELL_D, 1}}, 0, true);
     lincomb(mem[CELL_PB], {{CELL_A, 1}, {CELL_D, -1}}, 0, true);
     T.stop("lincomb");
-    // Output(M_f, alpha):  (M_f1 mod alpha,  Y^(j) = floor(-M_f1 * v1^(j))_{gamma_o/alpha})
+    // Output(M_f, alpha):  (M_f1 mod alpha,  Y^(j) = floor(-M_f1 * v1^(j))_{gamma_o/alpha}):  shares of Delta^(j) * P mod alpha
     out.r0.resize(16 * N); out.r1.resize(16 * N);
     SlotHash H(x);
     for (int b = 0; b < 2; b++) {
@@ -672,7 +674,7 @@ struct Evaluator1 {
     lincomb(mem[CELL_P], {{CELL_A, 1}, {CELL_D, 1}}, 0, true, true);
     lincomb(mem[CELL_PB], {{CELL_A, 1}, {CELL_D, -1}}, 0, true, true);
     T.stop("lincomb");
-    // Output(M_y, alpha):  (M_y1 mod alpha,  Y^(j) = floor(M_y0 v2^(j) - M_y1 v1^(j))_{gamma_o/alpha}),  M_y0 = -g
+    // Output(M_y, alpha):  (M_y1 mod alpha,  Y^(j) = floor(M_y0 v2^(j) - M_y1 v1^(j))_{gamma_o/alpha}),  M_y0 = -g:  shares of Delta^(j) * P mod alpha
     out.r.resize(16 * N);
     SlotHash H(x);
     for (int b = 0; b < 2; b++) {

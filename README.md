@@ -6,8 +6,8 @@ OT"* (Construction 5, Section 7.3), instantiated with
 
 * the succinct half-chosen VOLE with local reconstruction (Construction 2),
 * the compact lattice-based packed public-key aHMAC (Construction 4, version
-  of 2026-09-08: SP-RLWE public samples, KDM-Enc1, KDM-Enc-Pack with payloads
-  `Delta^(j) in R_alpha` and randomness `theta^(j) <- chi_s`, memory-to-input
+  of 2026-09-08: SP-RLWE public samples, KDM-Enc1, KDM-Enc-Pack = encryptions of
+  the output secrets `Delta^(j) in R_alpha` under `s` (randomness `theta^(j) <- chi_s`), memory-to-input
   conversion, InpMemMult with rounding, and the rounded Output step
   `Y^(j) = floor(-M_1 v1^(j))_{gamma/alpha}` / `floor(M_0 v2^(j) - M_1 v1^(j))_{gamma/alpha}`),
 * the XOR5-MAJ7 GAR-wPRF written as an RMS program (Section 8),
@@ -33,7 +33,7 @@ notes); the default runs it over the full `gamma` exactly as written.
 | current construction, 58-bit primes, `--kQs 1` | 241 ms | 325 ms | **101 k** |
 | current construction, 58-bit primes, `--kQs 1`, paper's n = 4900 (`--lazy0`) | 264 ms | 298 ms | **110 k** |
 | current construction, 50-bit preset (`--ifma --kQs 1`), 2 threads/party | 192 ms | 226 ms | 145 k |
-| previous version (fresh RLWE sample mod alpha*Q_s, no rounding term), 58-bit | 226 ms | 301 ms | 109 k |
+| previous version (ternary payloads under a fresh RLWE sample mod alpha*Q_s), 58-bit | 226 ms | 301 ms | 109 k |
 
 On the earlier (faster) host the previous version ran at 160-190 k OTs/s
 single-threaded; scaled by the measured host ratio the current construction
@@ -119,11 +119,14 @@ actually accounts for. `beta' ≥ 2^{64} d |s x_S|` is all that Lemma 2 needs fo
 inputs. Everything else (Add/Mul/Output) is unchanged; the initial memory
 shares are simply small integers.
 
-**Output stage (KDM-Enc-Pack + rounded Output).** Exactly as in the current
-Construction 4: `PKPCF.KeyGen(0)` samples the payloads `Delta^(j) <- R_alpha`
-(uniform coefficients in `[0, alpha)`), KDM-Enc-Pack samples `theta^(j) <-
-chi_s` and outputs `v1^(j) = theta^(j) a + e1`, `v2^(j) = theta^(j) b1 + e2 +
-Delta^(j) floor(gamma/alpha)` with the SP-RLWE pair `(a, b1)` of step 2; the
+**Output stage (Delta-ciphertexts + rounded Output).** Exactly as in the
+current Construction 4: `PKPCF.KeyGen(0)` samples the output secrets
+`Delta^(j) <- R_alpha` (uniform coefficients in `[0, alpha)`); KDM-Enc-Pack
+encrypts them under `s` with fresh randomness `theta^(j) <- chi_s`:
+`v1^(j) = theta^(j) a + e1`, `v2^(j) = theta^(j) b1 + e2 + Delta^(j)
+floor(gamma/alpha)`, with the SP-RLWE pair `(a, b1)` of step 2 (in the code:
+`sk.delta`, `pk.v1/v2`, negated copies `ek.nv1/nv2`, scale
+`delta_scale_mod_g`); the
 Output step computes `Y_0^(j) = floor(-M_01 v1^(j))_{gamma/alpha}` and
 `Y_1^(j) = floor(M_10 v2^(j) - M_11 v1^(j))_{gamma/alpha}` (`M_10 = -g`), all
 mod gamma, which the test harness verifies to satisfy `Y_0^(j) - Y_1^(j) =
